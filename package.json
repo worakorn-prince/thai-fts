@@ -1,15 +1,16 @@
 {
   "name": "thai-fts",
   "version": "0.1.0",
-  "description": "Zero-dependency Thai tokenization & FTS for Node — mark-aware segmentation, tone-tolerant matching, synonyms, SQLite FTS5.",
+  "description": "tone-aware Thai full-text search with zero runtime dependencies",
   "author": "worakorn-prince",
   "license": "MIT",
   "private": false,
   "type": "module",
   "main": "./dist/index.cjs",
+  "module": "./dist/index.js",
   "types": "./dist/index.d.ts",
   "bin": {
-    "thai-fts": "./dist/cli.js"
+    "thai-fts": "dist/cli.js"
   },
   "exports": {
     ".": {
@@ -31,12 +32,31 @@
       "types": "./dist/fts5/index.d.ts",
       "import": "./dist/fts5/index.js",
       "require": "./dist/fts5/index.cjs"
-    }
+    },
+    "./package.json": "./package.json"
   },
   "files": [
     "dist",
     "README.md",
-    "LICENSE"
+    "README.th.md",
+    "docs",
+    "LICENSE",
+    "CHANGELOG.md",
+    "SECURITY.md"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/worakorn-prince/thai-fts.git"
+  },
+  "keywords": [
+    "thai",
+    "segmentation",
+    "fts",
+    "full-text-search",
+    "tokenizer",
+    "thai-language",
+    "sqlite",
+    "fts5"
   ],
   "engines": {
     "node": ">=22.13.0"

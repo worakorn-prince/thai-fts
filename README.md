@@ -1,37 +1,225 @@
 # thai-fts
 
-Zero-dependency Thai tokenization & full-text search for Node — mark-aware
-word segmentation, tone-tolerant matching, synonyms, and an SQLite FTS5 layer.
-Built on Node built-ins only (`node:sqlite`, `node:test`, `node:fs`).
+**Tone-aware Thai full-text search for Node.js — zero runtime dependencies.**
 
-## Status
+`thai-fts` solves two problems that trip up generic search stacks on Thai:
 
-Skeleton (`v0.1.0`): dual ESM + CJS build, package CLI stub, smoke tests
-wired. Core tokenizer, match engine, and FTS5 layer arrive in later
-milestones.
+1. **Thai is written without spaces between words.** `Intl.Segmenter` (full ICU)
+   is used first for word segmentation, with a built-in dictionary + syllable
+   heuristic as a small-icu fallback — so a document is indexed as
+   space-delimited words, and a query is turned into an ordered phrase of its
+   words.
+2. **Tone marks are semantically significant.** `ติดตั้ง` (install) is *not* the
+   same as `ติดตัง` (tone typo). The strict channel keeps tone marks significant;
+   an optional loose channel strips only `่ ้ ๊ ๋ ์ ํ` and rescues tone typos
+   **below** strict hits, never displacing them.
 
-## API (planned)
+Everything runs on Node built-ins — `Intl.Segmenter` and `node:sqlite`
+(FTS5). No native modules, no WASM, no npm runtime dependencies.
 
-- `core` — `wordTokens()`, `segmentForIndex()`, `looseForm()`, `hasThai()`
-- `engine` — FTS match builder + tone-tolerant fallback channel
-- `fts5` — `node:sqlite` FTS5 table with a mark-aware tokenizer
+```text
+docs, code, and tone examples:  ติดตั้ง ≠ ติดตัง  (strict)
+                                "ติดตั้ง" loose → "ติดตัง" (fallback)
+```
+
+## Features
+
+- ✂️ Thai word segmentation (`Intl.Segmenter` first, dict + syllable fallback)
+- 🎵 Tone-handling policy: **strict-primary** with an optional **loose** rescue channel
+- 🔎 FTS5 index + query via the Node built-in `node:sqlite`, mark-aware tokenizer
+- 🔁 TH↔EN transliteration synonyms (`deploy` ↔ `ดีพลอย`)
+- 📚 Dictionary registry seam (add words / synonyms / overrides at runtime)
+- 🔌 Pluggable engine interface + registry (`registerEngine` / `createEngine`)
+- 📦 Dual ESM + CJS, type declarations, no runtime dependencies, Node ≥ 22.13.0
+
+## Install
+
+```sh
+npm install thai-fts
+# Node 22.13+ required (node:sqlite)
+```
+
+## Quickstart
+
+### Full-text search (SQLite FTS5, memory-backed)
+
+```js
+import { createFts5Engine } from "thai-fts";
+
+const engine = createFts5Engine({ memory: true });          // tone: "both"
+
+engine.add({ id: "guide", title: "คู่มือติดตั้ง", body: "ขั้นตอนการติดตั้งโปรแกรม" });
+engine.add({ id: "billing", title: "ติดตังค่าบริการ", body: "รายเดือน 49 บาท" });
+
+engine.search("ติดตั้ง", { tone: "both" });
+// [
+//   { id: "guide",  rank: 1, snippet: "ขั้นตอนการติดตั้งโปรแกรม" },  // strict
+//   { id: "billing", rank: 2, snippet: "ติดตังค่าบริการ" },         // loose rescue
+// ]
+
+engine.close();
+```
+
+The dual-channel contract (default `tone: "both"`):
+
+- **strict channel** — mark-aware, exact: `ติดตัง` never collides with `ติดตั้ง`;
+- **loose channel** — de-accented (`looseForm`): a tone typo can still surface a
+  correctly-marked document, **always ranked below** strict hits and never when
+  the strict result list is already full (`limit` saturated).
+
+### Core only (no database)
+
+```js
+import { wordTokens, segmentForIndex, looseForm, hasThai, expandSynonyms } from "thai-fts/core";
+
+wordTokens("ติดตั้งโปรแกรม");        // ["ติดตั้ง", "โปรแกรม", …] (Intl.Segmenter)
+segmentForIndex("ติดตั้ง");          // " ติด ตั้ง "  space-delimited for an index
+looseForm("ติดตั้ง");                // "ติดตัง"     tone marks stripped
+hasThai("hello");                    // false
+expandSynonyms("deploy");            // ["deploy", "ดีพลอย"]
+```
 
 ## CLI
 
+The `thai-fts` binary ships with the package. Pipe-friendly plain output,
+`--json` wraps output as `{ ok, data }`, exit codes are `0` ok / `2` error.
+
+```sh
+thai-fts segment "ติดตั้งโปรแกรม"            # word tokens, one per line
+thai-fts loose "ติดตั้ง"                    # -> ติดตัง
+thai-fts synonyms deploy                   # -> ดีพลอย
+thai-fts check "สวัสดี"                     # -> 1
+
+# FTS5 commands share one engine per invocation, so :memory: works end-to-end:
+thai-fts index "ต้องติดตั้งโปรแกรมใหม่" --id first \
+           index "ติดตังค่าบริการ" --id second \
+           search "ติดตั้ง" --db :memory:
+# first	1	ต้องติดตั้งโปรแกรมใหม่
+# second	2	ติดตังค่าบริการ
+
+thai-fts search "ติดตั้ง" --tone strict --db db.sqlite   # strict channel only
+thai-fts search "ติดตั้ง" --limit 5 --tone both --db db.sqlite
+thai-fts --json search "ติดตั้ง" --db db.sqlite          # { ok: true, data: [...] }
 ```
-Usage:
-  thai-fts --help                show this help
+
+Run `thai-fts --help` for the full command reference.
+
+## API summary
+
+| Subpath | Surface |
+| --- | --- |
+| `thai-fts` (root) | everything below, plus `createFts5Engine` |
+| `thai-fts/core` | pure lexical core (no DB) |
+| `thai-fts/engine` | search-engine interface + registry |
+| `thai-fts/fts5` | `node:sqlite` FTS5 store / search / schemas |
+
+### Core — `thai-fts/core`
+
+**Segmentation** (`segment.ts`)
+
+- `wordTokens(text)` → `string[]` — mixed Thai/English word tokens (lowercased)
+- `segmentForIndex(text)` → `string` — Thai runs get spaces between words (idempotent)
+- `segmentQueryChunk(chunk)` → `string[]` — words of one whitespace chunk
+- `hasThai(text)` → `boolean`
+- `looseForm(text)` → `string` — strips only tone-level marks `่ ้ ๊ ๋ ์ ํ`, keeps vowels
+
+**Synonyms** (`synonyms.ts`) — TH↔EN transliteration/semantic synonyms
+
+- `expandSynonyms(term)` → `string[]` — term + every known counterpart
+- `expandChunkSynonyms(chunk)` → `string[]` — whole-chunk expansion (enquiry side)
+- `expandIndexedText(segmented)` → `string` — append synonym forms to a FTS payload (idempotent)
+
+**Query building** (`query.ts`) — adapter-agnostic MATCH expression builders
+
+- `buildFtsMatch(query)` / `buildLooseFtsMatch(query)` → FTS5 MATCH expression
+- `buildSearchQuery(query, mode?)` → `{ mode, chunks, match, looseMatch }`
+- `quoteFtsToken(token)` → quote/escape-safe token (FTS5)
+
+**Tone policy** (`tone.ts`)
+
+- `resolveToneMode(opts?)` → `"both" | "strict" | "loose"` (default `both`)
+
+**Dictionaries** (`dictionaries.ts`) — registry seam
+
+- `THAI_DEFAULT_WORDS`, `THAI_DEFAULT_SYNONYMS` (dev/tech defaults, always active)
+- `registerThaiDictionary({ id, words?, synonyms?, overrides? })`
+- `listDictionaries()`, `clearRegisteredDictionaries()`
+
+### Engine — `thai-fts/engine`
+
+- `ThaiSearchEngine` — `{ add(doc), remove(id), search(query, opts?), close() }`
+- `ThaiSearchDoc`, `ThaiSearchResult`, `ThaiEngineOptions`, `ThaiEngineFactory`
+- `registerEngine(name, factory)`, `createEngine(name, opts?)`, `listEngines()`, `unregisterAllEngines()`
+
+### FTS5 — `thai-fts/fts5`
+
+- `createFts5Engine({ path?, memory?, tone?, limit?, dictionaries? })` → `ThaiSearchEngine`
+- `openFts5Store({ path?, memory?, dictionaries? })` → `{ db, add, remove, update, rebuild, close, get, allRows }`
+- `fts5Search(store, query, opts?)` → `ThaiSearchResult[]` (dual-channel, `filter` hook)
+- `FTS5_STRICT_SCHEMA`, `FTS5_LOOSE_SCHEMA` — mark-aware DDL (`unicode61 categories 'L* N* Co M*'`)
+
+## Tone policy
+
+Thai tone marks are meaningful (`ติดตั้ง` install ≠ `ติดตัง` typo). Default
+behavior is **strict-primary, loose-assist**:
+
+1. **strict** — the mark-aware index. Authoritative and exact.
+2. **loose** (only while strict is short of `limit`) — `looseForm` of the *same*
+   indexed payload, deduped by id, ranked after all strict hits.
+
+`tone: "strict"` gives exact-only matching; `tone: "loose"` gives de-accented
+matching only; `tone: "both"` (default) is the two-tier merge above. Short
+(1–2 char) pure-Thai queries use a LIKE fallback instead of FTS phrases and
+report `meta.method: "like_fallback"`.
+
+## Dictionaries
+
+Registration is additive on top of the built-in dev/tech defaults
+(`ติดตั้ง`, `เซิร์ฟเวอร์`, `ฐานข้อมูล`, `deploy` ↔ `ดีพลอย`, …):
+
+```js
+import { registerThaiDictionary } from "thai-fts";
+
+registerThaiDictionary({
+  id: "my-app",
+  words: ["ตากลม"],                                  // forced single token
+  synonyms: [["display", "จอภาพ"]],                  // bi-directional
+  overrides: [{ term: "โปรเจกต์", fixed: "โปรเจกต์" }],
+});
 ```
+
+## Adapters roadmap
+
+`ThaiSearchEngine` is a minimal pluggable contract; the registry is the seam for
+future backends. Today: `fts5` (reference, `node:sqlite`). Planned next:
+
+- **Meilisearch** / **Elasticsearch** — map `add`/`remove`/`search` over their REST APIs
+- **In-memory** — a small JS index for tests and offline tooling
+- **Vector / hybrid** — embeddings appended as a scoring layer, keeping the same interface
+
+```js
+import { registerEngine, createEngine } from "thai-fts";
+
+registerEngine("meilisearch", (opts) => new MeiliEngine(opts));
+const engine = createEngine("meilisearch", { host: "http://localhost:7700" });
+```
+
+## Zero runtime dependencies
+
+- Segmentation: `Intl.Segmenter` (built into Node full-icu), dict+syllable fallback
+- FTS: `node:sqlite` `DatabaseSync` + FTS5 virtual tables (built into Node ≥ 22.5)
+- Tests: `node:test`; build: `tsup` (dev-only)
 
 ## Development
 
 ```sh
 npm install
-npm run build     # tsup -> dist/ (ESM + CJS + d.ts)
-npm test          # build + node --test smoke tests
-npm run pack:check
+npm run build      # tsup -> dist/ (ESM + CJS + d.ts) for 4 subpaths
+npm test           # build + node --test (docs + CLI + core + FTS5)
+npm run pack:check # npm pack --dry-run (only dist + docs + READMEs ship)
+npx tsc --noEmit   # typecheck
 ```
 
 ## License
 
-MIT
+MIT — see [LICENSE](LICENSE).
