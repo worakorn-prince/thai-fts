@@ -9,6 +9,7 @@ const {
   registerThaiDictionary,
   listDictionaries,
   clearRegisteredDictionaries,
+  loadThaiWordsFromText,
   THAI_DEFAULT_WORDS,
   THAI_DEFAULT_SYNONYMS,
   expandSynonyms,
@@ -29,9 +30,48 @@ test("default seed lists are exported with the stable public names", () => {
   assert.ok(Array.isArray(THAI_DEFAULT_WORDS) && THAI_DEFAULT_WORDS.length > 0);
   assert.ok(THAI_DEFAULT_WORDS.includes("ติดตั้ง"), "dev/tech seed words present");
   assert.ok(
-    THAI_DEFAULT_SYNONYMS.length >= 15 && THAI_DEFAULT_SYNONYMS.length <= 25,
-    `expected 15-25 curated synonym pairs, got ${THAI_DEFAULT_SYNONYMS.length}`
+    THAI_DEFAULT_SYNONYMS.length >= 30 && THAI_DEFAULT_SYNONYMS.length <= 45,
+    `expected 30-45 curated synonym pairs, got ${THAI_DEFAULT_SYNONYMS.length}`
   );
+});
+
+test("loadThaiWordsFromText: splits on newlines/spaces, trims, drops blanks, dedupes", () => {
+  assert.deepEqual(loadThaiWordsFromText("สัญญา\nเช่า ซื้อขาย จำนอง   ก   ก"), [
+    "สัญญา",
+    "เช่า",
+    "ซื้อขาย",
+    "จำนอง",
+    "ก",
+  ]);
+  assert.deepEqual(loadThaiWordsFromText(""), []);
+  assert.deepEqual(loadThaiWordsFromText("  \n\t  "), []);
+  assert.deepEqual(loadThaiWordsFromText("ก ข ก"), ["ก", "ข"], "first occurrence wins");
+  assert.deepEqual(loadThaiWordsFromText("  สัญญา  "), ["สัญญา"], "trims surrounding whitespace");
+});
+
+test("registering words loaded from text keeps each listed term one token", () => {
+  clearRegisteredDictionaries();
+  const loaded = loadThaiWordsFromText("สัญญา\nเช่า ซื้อขาย จำนอง");
+  registerThaiDictionary({ id: "legal-app", words: loaded });
+
+  const found = listDictionaries().find((d) => d.id === "legal-app");
+  assert.deepEqual(found?.words, loaded, "loaded words are registered as-is");
+
+  forceSegmenter(null);
+  try {
+    for (const term of loaded) {
+      const toks = wordTokens(term);
+      assert.ok(toks.includes(term), `registered ${term} surfaced as a token in ${toks}`);
+    }
+    // A mixture of the loaded terms never drops characters and keeps whole terms.
+    const seg = segmentForIndex("ทำสัญญาจำนอง");
+    assert.equal(seg.replace(/ +/g, ""), "ทำสัญญาจำนอง", "no characters dropped");
+    assert.ok(seg.includes(" สัญญา "), `สัญญา merged token present: ${seg}`);
+    assert.ok(seg.includes(" จำนอง "), `จำนอง merged token present: ${seg}`);
+  } finally {
+    resetSegmenter();
+  }
+  clearRegisteredDictionaries();
 });
 
 test("listDictionaries is empty by default and returns registered ids", () => {
@@ -63,9 +103,11 @@ test("registering a word keeps it one token on the deterministic fallback path",
 
 test("without the word registered the same term splits on the fallback path", () => {
   clearRegisteredDictionaries();
+  const term = "มโหฬาร"; // verified NOT a member of THAI_DEFAULT_WORDS (post-expansion)
+  assert.ok(!THAI_DEFAULT_WORDS.includes(term), "fixture must be out-of-vocabulary");
   forceSegmenter(null);
   try {
-    const toks = wordTokens("นิติกรรม");
+    const toks = wordTokens(term);
     assert.ok(toks.length > 1, `expected the unregistered term to split, got ${toks}`);
   } finally {
     resetSegmenter();

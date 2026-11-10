@@ -205,6 +205,18 @@ registerThaiDictionary({
 
 **โมดูลอินสแตนซ์กับซับพาธ:** แต่ละซับพาธที่บิลด์ (`thai-fts`, `thai-fts/core`, …) เป็นโมดูลอินสแตนซ์แยกกัน ทะเบียนพจนานุกรมจึงเป็นแบบ per-instance กรณีใช้เอนจิน ให้ส่งพจนานุกรมผ่าน `createFts5Engine({ dictionaries: [...] })` (หรือ `openFts5Store`) — ครบในตัวเอง ไม่ต้องพึ่ง global state (แนะนำ) กรณีใช้ core โดยตรง ต้อง import `registerThaiDictionary` พร้อมกับทุกฟังก์ชันที่ใช้มัน (การตัดคำ/คำพ้อง) จาก entry/ซับพาธ **เดียวกัน** (มาจาก `"thai-fts"` ทั้งหมด หรือ `"thai-fts/core"` ทั้งหมด) เพื่อให้แชร์โมดูลอินสแตนซ์เดียวกัน
 
+**โหลดรายการคำจากไฟล์ (word list ต่อโดเมน)** — `loadThaiWordsFromText` แยกคำจากข้อความอิสระ (คั่นด้วยบรรทัดใหม่/เว้นวรรค), ตัดช่องว่างและตัดรายการซ้ำ ให้ใช้ไฟล์คำธรรมดาต่อโดเมน (กฎหมาย, วรรณกรรม, …) ได้ทันที:
+
+```js
+import { loadThaiWordsFromText, registerThaiDictionary } from "thai-fts";
+import { readFile } from "node:fs/promises";
+
+const words = loadThaiWordsFromText(await readFile("legal-words.txt", "utf8"));
+registerThaiDictionary({ id: "legal-app", words });
+```
+
+ใช้ `words` เมื่อต้องการให้คำนั้นถูกบังคับให้เป็น **หนึ่งโทเคน** (กรณีทั่วไปสำหรับคำประสม/ชื่อเฉพาะ) และใช้ `overrides` เฉพาะเมื่อต้อง **รีแมป** คำที่ถูกตัดแล้วไปเป็นโทเคนตายตัวอื่น (`{ term, fixed }`) ส่วน `THAI_DEFAULT_WORDS` (~1.3k คำ รวม seed กฎหมาย/วรรณกรรม) และ `THAI_DEFAULT_SYNONYMS` (38 คู่) ทำงานอยู่ข้างใต้เสมอ
+
 ## แผนงานอะแดปเตอร์
 
 `ThaiSearchEngine` คือคอนแทรกต์แบบ pluggable ขั้นต่ำ และทะเบียนคือช่องต่อสำหรับแบ็กเอนด์ในอนาคต ปัจจุบัน: `fts5` (อ้างอิง, `node:sqlite`) ต่อไปตามแผน:

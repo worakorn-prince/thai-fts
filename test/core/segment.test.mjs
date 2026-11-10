@@ -11,6 +11,7 @@ const {
   wordTokens,
   looseForm,
   normalizeThaiInput,
+  THAI_DEFAULT_WORDS,
   forceSegmenter,
   resetSegmenter,
   setThaiSegmenter,
@@ -234,4 +235,30 @@ test("setThaiSegmenter: validates input and rejects malformed segmenters", () =>
   assert.throws(() => setThaiSegmenter("segmenter"), TypeError);
   assert.throws(() => setThaiSegmenter(123), TypeError);
   setThaiSegmenter(null);
+});
+
+test("THAI_DEFAULT_WORDS is a broad seed dictionary (900-2200 entries)", () => {
+  const n = THAI_DEFAULT_WORDS.length;
+  assert.ok(n >= 900 && n <= 2200, `expected 900-2200 entries, got ${n}`);
+  assert.equal(new Set(THAI_DEFAULT_WORDS).size, n, "seed words must be unique");
+  // category representatives present after expansion
+  for (const w of ["ติดตั้ง", "สัญญา", "โจทก์", "กลอน", "นิทาน", "จำเลย"]) {
+    assert.ok(THAI_DEFAULT_WORDS.includes(w), `seed word ${w} expected in THAI_DEFAULT_WORDS`);
+  }
+});
+
+test("fallback dict: legal & literary sentences segment without dropping characters", () => {
+  forceSegmenter(null);
+  try {
+    const legal = "โจทก์ยื่นฟ้องคดีแพ่งต่อศาลและจำเลย";
+    const lit = "กาพย์กลอนนิราศร้อยกรองและนิทาน";
+    for (const s of [legal, lit]) {
+      const once = segmentForIndex(s);
+      const toks = once.trim().split(/\s+/).filter(Boolean);
+      assert.ok(toks.length > 1, `expected several words, got: ${once}`);
+      assert.equal(toks.join(""), s, `fallback must not drop characters: ${s}`);
+    }
+  } finally {
+    resetSegmenter();
+  }
 });

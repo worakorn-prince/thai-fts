@@ -258,6 +258,24 @@ For pure core use, import `registerThaiDictionary` **and** every function that
 consumes it (segmentation/synonyms) from the **same** entry/subpath (all from
 `"thai-fts"`, or all from `"thai-fts/core"`), so they share one module instance.
 
+**Loading a domain word list from a file** — `loadThaiWordsFromText` splits a
+free-form list (newlines/spaces), trims, and dedupes, so you can ship a plain
+word file per domain (legal, literary, …):
+
+```js
+import { loadThaiWordsFromText, registerThaiDictionary } from "thai-fts";
+import { readFile } from "node:fs/promises";
+
+const words = loadThaiWordsFromText(await readFile("legal-words.txt", "utf8"));
+registerThaiDictionary({ id: "legal-app", words });
+```
+
+Prefer `words` when a term should simply be kept as **one forced token** (the
+most common case for compounds/names), and `overrides` only to **re-map** a
+specific segmented term to a different fixed token (`{ term, fixed }`).
+`THAI_DEFAULT_WORDS` (~1.3k entries incl. legal/literary seeds) and
+`THAI_DEFAULT_SYNONYMS` (38 pairs) are always active underneath.
+
 ## Adapters roadmap
 
 `ThaiSearchEngine` is a minimal pluggable contract; the registry is the seam for

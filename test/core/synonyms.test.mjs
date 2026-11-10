@@ -18,9 +18,9 @@ const skip = typeof Intl.Segmenter !== "function";
 test("THAI_DEFAULT_SYNONYMS: curated size and bidirectional shape", () => {
   assert.ok(
     Array.isArray(THAI_DEFAULT_SYNONYMS) &&
-      THAI_DEFAULT_SYNONYMS.length >= 15 &&
-      THAI_DEFAULT_SYNONYMS.length <= 25,
-    `expected 15-25 curated pairs, got ${THAI_DEFAULT_SYNONYMS.length}`
+      THAI_DEFAULT_SYNONYMS.length >= 30 &&
+      THAI_DEFAULT_SYNONYMS.length <= 45,
+    `expected 30-45 curated pairs, got ${THAI_DEFAULT_SYNONYMS.length}`
   );
   for (const [en, th] of THAI_DEFAULT_SYNONYMS) {
     assert.ok(/^[a-z0-9-]+$/.test(en), `EN key should be a plain token: ${en}`);
@@ -61,6 +61,26 @@ test("expandChunkSynonyms: chunk verbatim + variants; unknown stays just the chu
   assert.deepEqual(expandChunkSynonyms("zzz"), ["zzz"]);
   // the chunk keeps its original case; variants are lowercased
   assert.deepEqual(expandChunkSynonyms("DEPLOY"), ["DEPLOY", "ดีพลอย"]);
+});
+
+test("expanded synonym pairs expand both directions", () => {
+  const pairs = [
+    ["software", "ซอฟต์แวร์"],
+    ["hardware", "ฮาร์ดแวร์"],
+    ["network", "เครือข่าย"],
+    ["security", "ความปลอดภัย"],
+    ["computer", "คอมพิวเตอร์"],
+    ["document", "เอกสาร"],
+    ["contact", "ติดต่อ"],
+    ["report", "รายงาน"],
+    ["system", "ระบบ"],
+    ["file", "ไฟล์"],
+  ];
+  for (const [en, th] of pairs) {
+    assert.ok(expandSynonyms(en).includes(th), `${en} -> ${th}`);
+    assert.ok(expandSynonyms(th).includes(en), `${th} -> ${en}`);
+    assert.ok(expandChunkSynonyms(en).includes(th), `${en} chunk -> ${th}`);
+  }
 });
 
 test("expandIndexedText: appends counterparts, no drift on unknown text", { skip }, () => {

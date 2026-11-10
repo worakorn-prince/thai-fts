@@ -44,6 +44,24 @@ export const THAI_DEFAULT_SYNONYMS: readonly SynonymPair[] = [
   ["memory", "หน่วยความจำ"], // memory (hardware sense).
   ["config", "คอนฟิก"], // TH loanword for config.
   ["debug", "ดีบั๊ก"], // TH loanword; dictionary word.
+  ["software", "ซอฟต์แวร์"], // TH loanword for software.
+  ["hardware", "ฮาร์ดแวร์"], // TH loanword for hardware.
+  ["network", "เครือข่าย"], // semantic TH term for network.
+  ["security", "ความปลอดภัย"], // semantic TH term for security.
+  ["computer", "คอมพิวเตอร์"], // TH loanword; dictionary word.
+  ["document", "เอกสาร"], // semantic TH term for document.
+  ["contact", "ติดต่อ"], // TH verb.
+  ["report", "รายงาน"], // TH noun/verb.
+  ["system", "ระบบ"], // TH noun; dictionary word.
+  ["file", "ไฟล์"], // TH loanword; dictionary word.
+  ["email", "อีเมล"], // TH loanword; dictionary word.
+  ["password", "รหัสผ่าน"], // semantic TH term.
+  ["login", "ล็อกอิน"], // TH loanword; dictionary word.
+  ["upload", "อัปโหลด"], // TH loanword; dictionary word.
+  ["download", "ดาวน์โหลด"], // TH loanword; dictionary word.
+  ["browser", "เบราว์เซอร์"], // TH loanword; dictionary word.
+  ["website", "เว็บไซต์"], // TH loanword; dictionary word.
+  ["folder", "โฟลเดอร์"], // TH loanword; dictionary word.
 ];
 
 const THAI_RE = /[\u0E00-\u0E7F]/;

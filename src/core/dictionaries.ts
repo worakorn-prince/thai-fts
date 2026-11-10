@@ -20,6 +20,30 @@ import type { ThaiDictionaryDef } from "./types.js";
 
 export { THAI_DEFAULT_WORDS, THAI_DEFAULT_SYNONYMS };
 
+/**
+ * Parse a free-form word list into a clean array of unique words. Accepts
+ * newline-separated, space-separated (or mixed) text, trims each entry, drops
+ * blank lines/segments, and de-duplicates while preserving first-occurrence
+ * order. Pure — no I/O, no Node built-ins.
+ *
+ * ```ts
+ * loadThaiWordsFromText("สัญญา\nเช่า ซื้อขาย จำนอง");
+ * // → ["สัญญา", "เช่า", "ซื้อขาย", "จำนอง"]
+ * ```
+ */
+export function loadThaiWordsFromText(text: string): string[] {
+  const seen = new Set<string>();
+  const out: string[] = [];
+  for (const raw of String(text ?? "").split(/\s+/)) {
+    const w = raw.trim();
+    if (w && !seen.has(w)) {
+      seen.add(w);
+      out.push(w);
+    }
+  }
+  return out;
+}
+
 const registrations = new Map<string, ThaiDictionaryDef>();
 
 function collectWords(def: ThaiDictionaryDef): SegmentOverride[] {
