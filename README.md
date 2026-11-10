@@ -122,6 +122,28 @@ Run `thai-fts --help` for the full command reference.
 - `segmentQueryChunk(chunk)` → `string[]` — words of one whitespace chunk
 - `hasThai(text)` → `boolean`
 - `looseForm(text)` → `string` — strips only tone-level marks `่ ้ ๊ ๋ ์ ํ`, keeps vowels
+- `normalizeThaiInput(text)` → `string` — NFC composition + strips zero-width chars
+  (`U+200B U+200C U+200D U+FEFF`), idempotent. Applied automatically at the start of
+  every segmentation/query path so a hidden separator inside a Thai word can never
+  split it — index and query stay symmetric.
+- `setThaiSegmenter(segmenter)` — plug in an external Thai segmenter; `null` restores
+  auto-detection. Throws `TypeError` on a malformed segmenter.
+- `getThaiSegmenterInfo()` → `{ source: "intl" | "custom" | "dict" | "none", hasSegmenter }`
+
+**Bridging an external segmenter** — any object implementing `Intl.Segmenter`'s shape
+(a `.segment(text)` method returning an iterable of `{ segment, isWordLike? }`) can
+replace the built-in splitter, e.g. a wasm attacut wrapper or a PyThaiNLP RPC bridge:
+
+```js
+import { setThaiSegmenter } from "thai-fts";
+setThaiSegmenter({
+  segment(text) {
+    return wasmAttacut.segment(text); // [{ segment: "ติดตั้ง", isWordLike: true }, ...]
+  },
+});
+// `null` restores Intl.Segmenter (or the dict + syllable fallback):
+setThaiSegmenter(null);
+```
 
 **Synonyms** (`synonyms.ts`) — TH↔EN transliteration/semantic synonyms
 

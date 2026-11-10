@@ -10,13 +10,19 @@ const {
   segmentQueryChunk,
   wordTokens,
   looseForm,
+  normalizeThaiInput,
   forceSegmenter,
   resetSegmenter,
+  setThaiSegmenter,
+  getThaiSegmenterInfo,
 } = await import("../../dist/index.js");
 
 const ICU_AVAILABLE = typeof Intl.Segmenter === "function";
 
-after(() => resetSegmenter());
+after(() => {
+  resetSegmenter();
+  setThaiSegmenter(null);
+});
 
 test("looseForm: strips tone-level marks only, keeps vowels", () => {
   // ติดตั้ง collapses to ติดตัง — exactly the fallback-match equivalence the
@@ -149,4 +155,83 @@ test("resetSegmenter restores the Intl.Segmenter path", { skip: !ICU_AVAILABLE }
     .filter(Boolean)
     .map((w) => w.toLowerCase());
   assert.deepEqual(wordTokens(run), expectWords);
+});
+
+test("normalizeThaiInput: NFC composition + zero-width strip, idempotent, passthrough", () => {
+  // NFC composition: decomposed e + acute -> precomposed é (both inputs agree).
+  assert.equal(normalizeThaiInput("e\u0301"), "\u00e9");
+  assert.equal(normalizeThaiInput("\u00e9"), "\u00e9");
+  // Each supported zero-width / format character is removed (ZWSP ZWNJ ZWJ BOM).
+  assert.equal(normalizeThaiInput("ติด\u200Bตั้ง"), "ติดตั้ง");
+  assert.equal(normalizeThaiInput("ติด\u200Cตั้ง"), "ติดตั้ง");
+  assert.equal(normalizeThaiInput("ติด\u200Dตั้ง"), "ติดตั้ง");
+  assert.equal(normalizeThaiInput("ติด\uFEFFตั้ง"), "ติดตั้ง");
+  // Non-Thai passthrough keeps exact bytes; empty stays empty.
+  assert.equal(normalizeThaiInput("Hello WORLD"), "Hello WORLD");
+  assert.equal(normalizeThaiInput("  a  b  "), "  a  b  ");
+  assert.equal(normalizeThaiInput(""), "");
+  // Idempotent fixed point on messy input.
+  const messy = "ใช้e\u0301\u200Bpnpm \uFEFF";
+  assert.equal(normalizeThaiInput(normalizeThaiInput(messy)), normalizeThaiInput(messy));
+});
+
+test("segmentForIndex: zero-width inside a Thai word no longer splits it", () => {
+  const clean = segmentForIndex("ติดตั้งโปรแกรม");
+  const hidden = segmentForIndex("ติด\u200Bตั้ง\u200Cโปร\u200Dแกรม\uFEFF");
+  assert.equal(hidden, clean, "hidden zero-width chars must not change segmentation");
+  assert.ok(!hidden.includes("\u200B"), "zero-width chars are gone from the result");
+  assert.ok(![...hidden].some((c) => ["\u200B", "\u200C", "\u200D", "\uFEFF"].includes(c)));
+});
+
+test("segmentForIndex: byte-idempotent after normalization for messy input", () => {
+  const once = segmentForIndex("ใช้\u200Bpnpm\u200C และ\uFEFF Omise");
+  assert.equal(segmentForIndex(once), once);
+});
+
+test("normalizeThaiInput: precomposed and decomposed forms segment identically", () => {
+  // Thai ไทย has no canonically decomposable code points, so a Latin é (U+00E9
+  // vs e + U+0301) inside a mixed Thai/EN string proves NFC invariance on the
+  // full pipeline: normalize runs before the Thai-run regex on both sides.
+  assert.equal(segmentForIndex("ใช้e\u0301pnpm"), segmentForIndex("ใช้\u00e9pnpm"));
+  assert.equal(looseForm("caf\u00e9"), looseForm("cafe\u0301"));
+  assert.deepEqual(wordTokens("caf\u00e9"), wordTokens("cafe\u0301"));
+});
+
+test("setThaiSegmenter/getThaiSegmenterInfo: custom segmenter round-trip", () => {
+  const infoDefault = getThaiSegmenterInfo();
+  assert.equal(infoDefault.hasSegmenter, ICU_AVAILABLE);
+  assert.equal(infoDefault.source, ICU_AVAILABLE ? "intl" : "dict");
+
+  const stub = {
+    segment: (text) => [{ segment: text, isWordLike: true }],
+  };
+  setThaiSegmenter(stub);
+  assert.deepEqual(getThaiSegmenterInfo(), { source: "custom", hasSegmenter: true });
+  assert.deepEqual(wordTokens("ติดตั้ง"), ["ติดตั้ง"]);
+  assert.deepEqual(segmentQueryChunk("ติดตั้ง"), ["ติดตั้ง"]);
+
+  // Re-setting after the module already cached a segmenter picks up the new one.
+  const stub2 = {
+    segment: (text) => [{ segment: text + "!", isWordLike: true }],
+  };
+  setThaiSegmenter(stub2);
+  assert.deepEqual(wordTokens("ติดตั้ง"), ["ติดตั้ง!"]);
+
+  // null restores auto-detection.
+  setThaiSegmenter(null);
+  const infoRestored = getThaiSegmenterInfo();
+  assert.equal(infoRestored.source, ICU_AVAILABLE ? "intl" : "dict");
+  assert.equal(infoRestored.hasSegmenter, ICU_AVAILABLE);
+  assert.deepEqual(wordTokens("ใช้pnpm"), ["ใช้", "pnpm"]);
+});
+
+test("setThaiSegmenter: validates input and rejects malformed segmenters", () => {
+  assert.doesNotThrow(() => setThaiSegmenter(null), "null restores auto-detection");
+  assert.doesNotThrow(() => setThaiSegmenter({ segment: () => [] }));
+  assert.throws(() => setThaiSegmenter(), TypeError);
+  assert.throws(() => setThaiSegmenter({}), TypeError);
+  assert.throws(() => setThaiSegmenter({ segment: 42 }), TypeError);
+  assert.throws(() => setThaiSegmenter("segmenter"), TypeError);
+  assert.throws(() => setThaiSegmenter(123), TypeError);
+  setThaiSegmenter(null);
 });

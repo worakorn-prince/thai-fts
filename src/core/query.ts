@@ -16,8 +16,13 @@
  * "ติดตัง" become the same loose phrase and a tone-mark typo can still match a
  * correctly-marked document. For pure-ASCII queries it is just a lowercase, so
  * it matches the same docs as the strict channel there.
+ *
+ * All three builders normalize the raw query (`normalizeThaiInput`) at the
+ * chunk-split point, mirroring the index side — so hidden zero-width
+ * characters embedded in a query Thai word behave exactly like the same word
+ * indexed cleanly, keeping the index and query transforms symmetric.
  */
-import { hasThai, looseForm, segmentQueryChunk } from "./segment.js";
+import { hasThai, looseForm, normalizeThaiInput, segmentQueryChunk } from "./segment.js";
 import { expandChunkSynonyms } from "./synonyms.js";
 import type { BuiltQuery, QueryChunk, ToneMode } from "./types.js";
 
@@ -28,7 +33,7 @@ export function quoteFtsToken(t: string): string {
 }
 
 export function buildFtsMatch(query: string): string {
-  const chunks = query.trim().split(/\s+/).filter(Boolean).slice(0, 8);
+  const chunks = normalizeThaiInput(query).trim().split(/\s+/).filter(Boolean).slice(0, 8);
   return chunks
     .map((chunk) => {
       // A Thai chunk becomes an FTS5 phrase of its words: "ติด ตั้ง เร็ว"
@@ -70,7 +75,7 @@ export function buildFtsMatch(query: string): string {
  * case-folds) and the loose channel adds nothing.
  */
 export function buildLooseFtsMatch(query: string): string {
-  const chunks = query.trim().split(/\s+/).filter(Boolean).slice(0, 8);
+  const chunks = normalizeThaiInput(query).trim().split(/\s+/).filter(Boolean).slice(0, 8);
   return chunks
     .map((chunkRaw) => {
       const chunk = looseForm(chunkRaw);
@@ -106,7 +111,7 @@ export function buildSearchQuery(
   mode?: ToneMode | { mode?: ToneMode }
 ): BuiltQuery {
   const tone = resolveTone(mode);
-  const chunkTexts = query.trim().split(/\s+/).filter(Boolean).slice(0, 8);
+  const chunkTexts = normalizeThaiInput(query).trim().split(/\s+/).filter(Boolean).slice(0, 8);
   const chunks: QueryChunk[] = chunkTexts.map((raw) => {
     const thai = hasThai(raw);
     const words = thai ? segmentQueryChunk(raw) : [raw];

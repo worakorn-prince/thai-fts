@@ -97,3 +97,19 @@ test("buildSearchQuery: unknown chunk keeps words/synonyms minimal", () => {
   assert.equal(q.match, '"zzz"');
   assert.equal(q.looseMatch, '"zzz"');
 });
+
+test("zero-width chars inside a Thai query word match the clean phrase", () => {
+  // Index and query are normalized symmetrically, so a hidden separator that
+  // would otherwise split "ติดตั้ง" behaves exactly like the clean input.
+  assert.equal(buildFtsMatch("ติด\u200Bตั้ง"), buildFtsMatch("ติดตั้ง"));
+  assert.equal(buildFtsMatch("ติด\u200Cตั้ง\u200Dโปร"), buildFtsMatch("ติดตั้งโปร"));
+  assert.equal(buildLooseFtsMatch("ติด\u200Bตั้ง"), buildLooseFtsMatch("ติดตั้ง"));
+  assert.equal(buildSearchQuery("ติด\u200Bตั้ง").match, buildSearchQuery("ติดตั้ง").match);
+  assert.equal(buildSearchQuery("ติด\u200Bตั้ง").looseMatch, buildSearchQuery("ติดตั้ง").looseMatch);
+});
+
+test("NFC invariance on the query side (precomposed vs decomposed)", () => {
+  assert.equal(buildFtsMatch("caf\u00e9"), buildFtsMatch("cafe\u0301"));
+  assert.equal(buildLooseFtsMatch("caf\u00e9"), buildLooseFtsMatch("cafe\u0301"));
+  assert.equal(buildSearchQuery("ใช้e\u0301").match, buildSearchQuery("ใช้\u00e9").match);
+});

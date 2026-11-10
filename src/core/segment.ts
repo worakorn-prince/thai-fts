@@ -37,22 +37,77 @@ const THAI_RUN_RE = /[\u0E00-\u0E7F]+/g;
 // class — looseForm keeps vowels intact and only strips tone-level marks.
 const THAI_TONE_MARK_RE = /[\u0E48\u0E49\u0E4A\u0E4B\u0E4C\u0E4D]/g;
 
+// Zero-width / format characters stripped by `normalizeThaiInput` so hidden
+// characters can never split a Thai word or a Latin token: U+200B ZERO WIDTH
+// SPACE, U+200C ZERO WIDTH NON-JOINER, U+200D ZERO WIDTH JOINER and U+FEFF
+// BYTE ORDER MARK / ZERO WIDTH NO-BREAK SPACE. Deliberately minimal — only
+// these four are removed; everything else passes through untouched.
+const ZERO_WIDTH_RE = /[\u200B\u200C\u200D\uFEFF]/g;
+
+/**
+ * Normalize Thai (and mixed) input before lexical processing: Unicode NFC
+ * canonical composition first, then strip the four zero-width/format
+ * characters (U+200B U+200C U+200D U+FEFF) that otherwise behave like
+ * separators and split a Thai run or a Latin token mid-word.
+ *
+ * The transform is an idempotent fixed point: NFC of an NFC string is the same
+ * string, and every zero-width char is removed in a single pass, so applying it
+ * again is a no-op. Because it runs *before* the Thai-run regex, a zero-width
+ * character embedded inside a Thai word no longer splits it — index and query
+ * sides both call it, keeping them symmetric.
+ *
+ * Non-Thai text is effectively unchanged: NFC composition is ASCII/UTF-16
+ * No-op-agnostic for Latin, and there are no zero-width chars to strip, so
+ * pure-Latin passthrough keeps its exact bytes.
+ */
+export function normalizeThaiInput(text: string): string {
+  return String(text ?? "").normalize("NFC").replace(ZERO_WIDTH_RE, "");
+}
+
 interface SegmentLike {
   segment: string;
   isWordLike?: boolean;
 }
 type Segmenter = { segment(text: string): Iterable<SegmentLike> };
 
+/**
+ * Validates a candidate custom segmenter at the API boundary. A segmenter must
+ * be a non-null object exposing a `.segment(text)` function that returns an
+ * iterable of `{ segment, isWordLike? }` records (`Intl.Segmenter`'s own shape).
+ * Throws a clear TypeError otherwise so misconfiguration fails fast.
+ */
+function assertSegmenter(segmenter: unknown): asserts segmenter is Segmenter {
+  const ok =
+    segmenter !== null &&
+    typeof segmenter === "object" &&
+    typeof (segmenter as { segment?: unknown }).segment === "function";
+  if (!ok) {
+    throw new TypeError(
+      "setThaiSegmenter: expected a segmenter object implementing { segment(text) -> iterable of { segment, isWordLike? } }, got " +
+        (segmenter === null ? "null" : typeof segmenter)
+    );
+  }
+}
+
 let cached: Segmenter | null | undefined;
 
 /**
+ * Public custom segmenter set via `setThaiSegmenter`. `undefined` = none set
+ * (auto-detection); a non-null object = that segmenter is in use; the value is
+ * never stored as `null` because passing `null` to `setThaiSegmenter` restores
+ * auto-detection instead of forcing the dictionary fallback.
+ */
+let custom: Segmenter | undefined;
+
+/**
  * @internal test hook — when set, `getSegmenter()` returns it verbatim and
- * skips auto-detection.
+ * skips auto-detection (including the public custom slot).
  */
 let forced: Segmenter | null | undefined;
 
 function getSegmenter(): Segmenter | null {
   if (forced !== undefined) return forced;
+  if (custom !== undefined) return custom;
   if (cached !== undefined) return cached;
   try {
     const Ctor = (
@@ -85,6 +140,61 @@ export function forceSegmenter(seg: Segmenter | null): void {
 export function resetSegmenter(): void {
   forced = undefined;
   cached = undefined;
+}
+
+/**
+ * Public seam to plug in an external Thai segmenter (e.g. a wasm attacut
+ * wrapper or PyThaiNLP RPC bridge) that implements `Intl.Segmenter`'s shape:
+ *
+ * ```ts
+ * setThaiSegmenter({
+ *   segment(text) {
+ *     return [{ segment: text, isWordLike: true }]; // per-word records
+ *   },
+ * });
+ * ```
+ *
+ * `wordTokens`/`segmentForIndex`/`segmentQueryChunk` all route through this
+ * segmenter. Passing `null` restores auto-detection (`Intl.Segmenter` when the
+ * runtime provides it, otherwise the built-in dictionary fallback). Works even
+ * after the module already cached a segmenter — the cache is invalidated, so
+ * re-calling it with a different segmenter also takes effect immediately.
+ *
+ * @throws {TypeError} when `segmenter` is not `null` and does not implement
+ *   `{ segment(text): Iterable<{ segment, isWordLike? }> }`.
+ */
+export function setThaiSegmenter(segmenter: Segmenter | null): void {
+  if (segmenter !== null) assertSegmenter(segmenter);
+  custom = segmenter ?? undefined;
+  cached = undefined;
+}
+
+/**
+ * Introspection for debugging/docs: which segmenter is powering Thai
+ * segmentation right now.
+ *
+ * `source` is:
+ * - `"custom"` — a segmenter set via `setThaiSegmenter()` is in use;
+ * - `"intl"` — `Intl.Segmenter` auto-detection is in use;
+ * - `"dict"` — the built-in dictionary + syllable fallback is in use
+ *   (no `Intl.Segmenter` on this runtime, or `forceSegmenter(null)` in tests);
+ * - `"none"` — reserved for a future runtime with neither (today the
+ *   dictionary fallback always guarantees at least `"dict"`).
+ *
+ * `hasSegmenter` is `true` when a real segmenter object (custom or Intl) is in
+ * play and `false` when segmentation falls back to the dictionary.
+ */
+export function getThaiSegmenterInfo(): {
+  source: "intl" | "custom" | "dict" | "none";
+  hasSegmenter: boolean;
+} {
+  if (forced !== undefined) {
+    return { source: forced === null ? "dict" : "custom", hasSegmenter: forced !== null };
+  }
+  if (custom !== undefined) return { source: "custom", hasSegmenter: true };
+  const seg = getSegmenter();
+  if (seg === null) return { source: "dict", hasSegmenter: false };
+  return { source: "intl", hasSegmenter: true };
 }
 
 // --- built-in dictionary fallback (small-icu runtimes) ---
@@ -332,7 +442,7 @@ export function hasThai(text: string): boolean {
  * content (tone marks stay significant there). Pure and idempotent.
  */
 export function looseForm(text: string): string {
-  return String(text ?? "").toLowerCase().replace(THAI_TONE_MARK_RE, "");
+  return normalizeThaiInput(text).toLowerCase().replace(THAI_TONE_MARK_RE, "");
 }
 
 /**
@@ -342,7 +452,7 @@ export function looseForm(text: string): string {
  * dictionary). Deterministic → re-tokenizing the joined tokens is a fixed point.
  */
 export function wordTokens(text: string): string[] {
-  const input = String(text ?? "");
+  const input = normalizeThaiInput(text);
   const seg = getSegmenter();
   const out: string[] = [];
   let last = 0;
@@ -378,7 +488,7 @@ function pushLatinTokens(segment: string, out: string[]): void {
  * whitespace because inputs without Thai are returned verbatim.
  */
 export function segmentForIndex(text: string): string {
-  const input = String(text ?? "");
+  const input = normalizeThaiInput(text);
   if (!hasThai(input)) return input;
   const seg = getSegmenter();
   const out = input.replace(THAI_RUN_RE, (run) => ` ${thaiTokens(run, seg).join(" ")} `);
