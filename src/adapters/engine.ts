@@ -40,6 +40,16 @@ export interface ThaiSearchResult {
   rank: number;
   /** Short window of matched text around the first hit, when one exists. */
   snippet?: string;
+  /** The matched text in ORIGINAL raw document coordinates (no inserted
+   * segmentation spaces), set only when `offsets` is requested and a valid
+   * alignment was found. Never guessed/incorrect: set from a verified
+   * raw↔indexed two-pointer map, or omitted. */
+  quote?: string;
+  /** Raw UTF-16 start index of the matched text in the source document.
+   * `slice(rawText, start, end) === quote` when set. */
+  start?: number;
+  /** Raw UTF-16 index just past the matched text. */
+  end?: number;
   /** Adapter-specific diagnostics such as `{ method, channel }`. */
   meta?: Record<string, unknown>;
 }
@@ -47,10 +57,19 @@ export interface ThaiSearchResult {
 /** Options accepted by engine creation and per-search calls. Where they are
  * provided at create time they act as defaults that a per-search option
  * overrides. `tone` chooses the matching channel (see ToneMode); `limit`
- * bounds the returned hits. */
+ * bounds the returned hits; `prefix`/`offsets`/`titleWeight` are the opt-in
+ * search features (see the fts5 adapter docs). */
 export interface ThaiEngineOptions {
   tone?: ToneMode;
   limit?: number;
+  /** Autocomplete mode: append FTS5 `*` to each phrase's final token so a
+   * partial word matches (needs a `prefix` store index for speed). */
+  prefix?: boolean;
+  /** When true, also compute verified raw `quote`/`start`/`end` per hit. */
+  offsets?: boolean;
+  /** Weight titles above bodies: title-column hit score × `titleWeight` +
+   * body-column hit score. Default (undefined) keeps unweighted ranking. */
+  titleWeight?: number;
 }
 
 /** The minimal engine contract shared by every adapter. Implementations should

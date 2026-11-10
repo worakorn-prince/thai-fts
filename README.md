@@ -175,10 +175,46 @@ setThaiSegmenter(null);
 
 ### FTS5 — `thai-fts/fts5`
 
-- `createFts5Engine({ path?, memory?, tone?, limit?, dictionaries? })` → `ThaiSearchEngine`
-- `openFts5Store({ path?, memory?, dictionaries? })` → `{ db, add, remove, update, rebuild, close, get, allRows }`
-- `fts5Search(store, query, opts?)` → `ThaiSearchResult[]` (dual-channel, `filter` hook)
+- `createFts5Engine({ path?, memory?, tone?, limit?, prefix?, stopwords? })` → `ThaiSearchEngine`
+- `openFts5Store({ path?, memory?, prefix?, stopwords?, dictionaries? })` → `{ db, add, remove, update, rebuild, close, get, allRows }`
+- `fts5Search(store, query, opts?)` → `ThaiSearchResult[]` (dual-channel, `filter` hook, `prefix`/`offsets`/`titleWeight`)
 - `FTS5_STRICT_SCHEMA`, `FTS5_LOOSE_SCHEMA` — mark-aware DDL (`unicode61 categories 'L* N* Co M*'`)
+
+#### Opt-in search features (all default off)
+
+**Prefix / autocomplete** — open the store with a prefix index, then search with
+`prefix: true` (the final token of each phrase gets an FTS5 trailing `*`):
+
+```js
+const store = openFts5Store({ memory: true, prefix: [2, 3] });
+fts5Search(store, "ติดตั้งโ", { prefix: true }); // partial word matches
+```
+
+**Offsets** — `offsets: true` adds verified `quote` / `start` / `end` per hit in
+RAW document coordinates (`raw.slice(start, end) === quote`; never guessed):
+
+```js
+const [hit] = fts5Search(store, "ติดตั้ง", { offsets: true });
+// hit.quote === "ติดตั้ง", hit.start/hit.end are raw indices
+```
+
+**Title weighting** — `titleWeight: N` ranks by `titleRank * N + bodyRank`, so a
+title match can outrank a body match:
+
+```js
+fts5Search(store, "ติดตั้ง", { titleWeight: 2 });
+```
+
+**Stopwords** — OPT-IN and symmetric: `stopwords: true` (or your own `string[]`)
+removes function words on BOTH the index and the query side. Toggling it changes
+the indexed payload, so an existing on-disk database must be rebuilt (`rebuild()`
+or re-open the file):
+
+```js
+const engine = createFts5Engine({ memory: true, stopwords: true });
+engine.add({ id: "x", body: "การติดตั้งโปรแกรม" });
+engine.search("การติดตั้ง"); // matches — "การ" is dropped on both sides
+```
 
 ## Tone policy
 

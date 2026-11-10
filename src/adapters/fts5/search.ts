@@ -20,6 +20,27 @@
  * filtered-out rows cannot starve in-scope hits (it is applied in JS to the
  * row shape `{ id, title, body }`).
  *
+ * ## Opt-in features (TASK-006, all default off)
+ *
+ *  - `prefix` — autocomplete: the query builders append an FTS5 prefix `*` to
+ *    each phrase's final token (needs a `prefix='n1 n2'` store index for
+ *    speed). Query-side phrase filtering matches the store-side stopwords.
+ *  - `stopwords` — ALWAYS threaded from `store.stopwords` into the query
+ *    builders (empty list = off). This keeps the query side symmetric with the
+ *    store's index-time stopword removal, so the opt-in feature works
+ *    end-to-end without extra per-search configuration.
+ *  - `offsets` — when true, each hit is enriched with `quote`/`start`/`end` in
+ *    RAW document coordinates (the `documents`-table text, not the space-
+ *    inserted segmented index). The matched segmented region is read back via
+ *    FTS5 `highlight()`, stripped of its markers, and mapped onto the raw text
+ *    with `mapSegmentedToRaw`; the mapping is validated (re-slicing raw must
+ *    equal the de-spaced quote), and any hit that cannot be aligned exactly is
+ *    SKIPPED — never guessed, so a wrong offset can never be emitted.
+ *  - `titleWeight` — when set to a finite number, ranking becomes
+ *    `titleRank*titleWeight + bodyRank` over the union of title-column and
+ *    body-column hits (FTS5 column-filter queries). When undefined, the
+ *    default single `ORDER BY rank` path is used unchanged.
+ *
  * ```ts
  * import { fts5Search } from "thai-fts";
  * const hits = fts5Search(store, "ติดตัง", { limit: 10, tone: "both" });
@@ -39,8 +60,9 @@ export interface Fts5Candidate {
   body: string;
 }
 
-/** Options for `fts5Search`. Extends the engine options with the filter hook;
- * `tone` resolves through `resolveToneMode` (default "both": strict first). */
+/** Options for `fts5Search`. Extends the engine options with the filter hook
+ * and the opt-in TASK-006 features; `tone` resolves through `resolveToneMode`
+ * (default "both": strict first). */
 export interface Fts5SearchOptions extends ThaiEngineOptions {
   /** Caller-owned predicate applied to each row before ranking/limit
    * accounting. Return true to keep a row. */
@@ -56,6 +78,9 @@ interface ChannelRow {
 
 const DEFAULT_LIMIT = 10;
 const MAX_LIMIT = 200;
+// Weighted-scoring stands-in for "no match in this column" (an unhit column
+// must rank far below any single-column hit once multiplied out).
+const MISS_RANK = 1e9;
 
 function clampLimit(limit: number | undefined): number {
   if (limit === undefined || limit === null) return DEFAULT_LIMIT;
@@ -141,7 +166,7 @@ function toResult(
   };
 }
 
-/** Search the store. See the module doc for channel semantics. */
+/** Search the store. See the module doc for channel + feature semantics. */
 export function fts5Search(
   store: Fts5Store,
   query: string,
@@ -153,6 +178,9 @@ export function fts5Search(
   const limit = clampLimit(opts.limit);
   const tone: ToneMode = resolveToneMode(opts);
   const needles = buildNeedles(trimmed);
+  const weighted = Number.isFinite(opts.titleWeight)
+    ? Number(opts.titleWeight)
+    : undefined;
 
   // 1–2 char pure-Thai query: FTS5 phrases are unreliable at this width, so
   // fall back to a SQL LIKE scan and say so (never a silent empty result).
@@ -164,11 +192,42 @@ export function fts5Search(
     return likeFallback(store, trimmed, tone, limit, opts.filter);
   }
 
-  const built = buildSearchQuery(trimmed, { mode: tone });
+  // Query-side stopword symmetry: ALWAYS thread the store's resolved stopword
+  // list (resolved to [] when off, so the empty list disables filtering and
+  // the default query is byte-identical). `prefix` stars each phrase's final
+  // token for autocomplete.
+  const built = buildSearchQuery(trimmed, {
+    mode: tone,
+    prefix: opts.prefix === true,
+    stopwords: store.stopwords,
+  });
   const db = store.db;
   const results: ThaiSearchResult[] = [];
   const seen = new Set<string>();
+  // Raw document text per hit id, for `offsets` mapping (the `documents`
+  // shadow table is the source of RAW text; the fts tables hold segmented).
+  const rawByKey = new Map<string, { title: string; body: string }>();
 
+  const pushResult = (row: ChannelRow, channel: string): void => {
+    if (results.length >= limit) return;
+    const key = String(row.id);
+    rawByKey.set(key, { title: row.title, body: row.body });
+    if (seen.has(key)) return;
+    if (opts.filter) {
+      const candidate: Fts5Candidate = {
+        id: decodeId(row),
+        title: row.title,
+        body: row.body,
+      };
+      if (!opts.filter(candidate)) return;
+    }
+    seen.add(key);
+    results.push(
+      toResult(row, needles, results.length + 1, { method: "fts5", channel })
+    );
+  };
+
+  // Default (unweighted) path: a single `ORDER BY rank` scan per channel.
   const runChannel = (table: string, match: string, channel: string): void => {
     const remaining = limit - results.length;
     if (remaining <= 0) return;
@@ -184,30 +243,93 @@ export function fts5Search(
     const rows = db.prepare(sql).all(...params) as unknown as ChannelRow[];
     for (const row of rows) {
       if (results.length >= limit) break;
-      const key = String(row.id);
-      if (seen.has(key)) continue;
-      if (opts.filter) {
-        const candidate: Fts5Candidate = {
-          id: decodeId(row),
-          title: row.title,
-          body: row.body,
-        };
-        if (!opts.filter(candidate)) continue;
-      }
-      seen.add(key);
-      results.push(
-        toResult(row, needles, results.length + 1, { method: "fts5", channel })
-      );
+      pushResult(row, channel);
     }
   };
 
+  // Weighted path (opt-in `titleWeight`): candidates = title-column hits ∪
+  // body-column hits; score each doc as titleRank*weight + bodyRank (MISS for
+  // a column the doc does not hit), sort ascending, then apply filter/dedupe/
+  // limit through the shared pusher. Keeps dual-channel strict-then-loose.
+  const runWeightedChannel = (
+    table: string,
+    match: string,
+    channel: string,
+    weight: number
+  ): void => {
+    if (results.length >= limit) return;
+    // Column-filter MATCH per column; raw text + is_num come from the
+    // `documents` shadow table (the fts tables store the segmented payload).
+    const base =
+      `SELECT d.id, d.is_num, d.title, d.body, ${table}.rank AS rank ` +
+      `FROM documents d JOIN ${table} ON ${table}.id = d.id WHERE ${table} MATCH ?`;
+    const tRows = db.prepare(base).all(`title : ${match}`) as unknown as Array<
+      ChannelRow & { rank: number }
+    >;
+    const bRows = db.prepare(base).all(`body : ${match}`) as unknown as Array<
+      ChannelRow & { rank: number }
+    >;
+
+    const tRank = new Map<string, number>();
+    const bRank = new Map<string, number>();
+    const all = new Map<string, ChannelRow>();
+    for (const r of tRows) {
+      const k = String(r.id);
+      tRank.set(k, r.rank);
+      all.set(k, r);
+    }
+    for (const r of bRows) {
+      const k = String(r.id);
+      bRank.set(k, r.rank);
+      if (!all.has(k)) all.set(k, r);
+    }
+
+    const scored: Array<{ row: ChannelRow; score: number }> = [];
+    for (const [k, row] of all) {
+      const t = tRank.get(k) ?? MISS_RANK;
+      const b = bRank.get(k) ?? MISS_RANK;
+      scored.push({ row, score: t * weight + b });
+    }
+    scored.sort((a, z) => a.score - z.score);
+    for (const s of scored) {
+      if (results.length >= limit) break;
+      pushResult(s.row, channel);
+    }
+  };
+
+  const channelRunner: (
+    table: string,
+    match: string,
+    channel: string
+  ) => void =
+    weighted === undefined
+      ? runChannel
+      : (table, match, channel) =>
+          runWeightedChannel(table, match, channel, weighted as number);
+
   if (tone === "strict") {
-    runChannel("fts5_strict", built.match, "strict");
+    channelRunner("fts5_strict", built.match, "strict");
   } else if (tone === "loose") {
-    runChannel("fts5_loose", built.looseMatch, "loose");
+    channelRunner("fts5_loose", built.looseMatch, "loose");
   } else {
-    runChannel("fts5_strict", built.match, "strict");
-    if (results.length < limit) runChannel("fts5_loose", built.looseMatch, "loose");
+    channelRunner("fts5_strict", built.match, "strict");
+    if (results.length < limit) channelRunner("fts5_loose", built.looseMatch, "loose");
+  }
+
+  // Verified raw offsets (opt-in). A hit that cannot be aligned exactly keeps
+  // its snippet but no quote/start/end — never a guessed offset.
+  if (opts.offsets === true) {
+    for (const r of results) {
+      const table = r.meta?.channel === "loose" ? "fts5_loose" : "fts5_strict";
+      const match = r.meta?.channel === "loose" ? built.looseMatch : built.match;
+      const raw = rawByKey.get(String(r.id));
+      const off = offsetsFor(store, table, match, String(r.id), raw);
+      if (off) {
+        r.quote = off.quote;
+        r.start = off.start;
+        r.end = off.end;
+      }
+    }
   }
   return results;
 }
@@ -267,4 +389,177 @@ function buildNeedles(query: string): string[] {
     for (const w of segmentQueryChunk(chunk)) needles.add(w);
   }
   return [...needles];
+}
+
+/* ------------------------------------------------------------------ *
+ * offsets: raw-coordinate highlight mapping (opt-in, validated)
+ * ------------------------------------------------------------------ */
+
+const HILITE_OPEN = "\u0001";
+const HILITE_CLOSE = "\u0002";
+
+/**
+ * Two-pointer alignment between a RAW document string and its SEGMENTED index
+ * payload. The segmented payload is the raw text with spaces inserted between
+ * Thai words (segmentForIndex) plus, possibly, appended synonym tokens that do
+ * not exist in the raw text at all.
+ *
+ * Walk both strings: an inserted whitespace char in `segmented` maps to `null`
+ * (the raw pointer does not advance); every other char maps to the raw index it
+ * aligns with (the raw pointer advances by one). Content that has no raw
+ * counterpart (appended synonym tokens past the end of `raw`) maps to `null`
+ * so it can never produce a fabricated offset. The caller validates the result
+ * by re-slicing `raw` and comparing it with the de-spaced quote — a mismatch
+ * means the offset cannot be trusted and is dropped.
+ */
+export function mapSegmentedToRaw(
+  raw: string,
+  segmented: string
+): Array<number | null> {
+  const text = String(raw ?? "");
+  const seg = String(segmented ?? "");
+  const out: Array<number | null> = [];
+  let ri = 0;
+  for (let i = 0; i < seg.length; i++) {
+    const ch = seg[i] as string;
+    if (ch === " " || ch === "\t" || ch === "\n" || ch === "\r") {
+      out.push(null);
+      continue;
+    }
+    if (ri < text.length) {
+      out.push(ri);
+      ri += 1;
+    } else {
+      out.push(null);
+    }
+  }
+  return out;
+}
+
+interface MarkSpan {
+  start: number;
+  end: number;
+}
+
+/** All `\u0001...\u0002` pairs in a highlighted column value. */
+function markerPairs(h: string): MarkSpan[] {
+  const out: MarkSpan[] = [];
+  let i = 0;
+  for (;;) {
+    const s = h.indexOf(HILITE_OPEN, i);
+    if (s === -1) break;
+    const e = h.indexOf(HILITE_CLOSE, s + 1);
+    if (e === -1) break;
+    out.push({ start: s, end: e + 1 });
+    i = e + 1;
+  }
+  return out;
+}
+
+/**
+ * The FIRST contiguous marker group in a highlighted column value (a phrase
+ * match marks several tokens that are only separated by whitespace; we want
+ * the whole first phrase, the "first hit"). Returns the de-marked segmented
+ * text and its starting position inside the un-marked stored payload.
+ */
+function firstMarkedRegion(
+  h: string | null
+): { seg: string; storedStart: number } | undefined {
+  const text = String(h ?? "");
+  const pairs = markerPairs(text);
+  if (pairs.length === 0) return undefined;
+  let last = 0;
+  for (let k = 1; k < pairs.length; k++) {
+    const between = text.slice(pairs[k - 1]?.end ?? 0, pairs[k]?.start ?? 0);
+    if (between.trim() !== "") break;
+    last = k;
+  }
+  const spanStart = (pairs[0] as MarkSpan).start;
+  const spanEnd = (pairs[last] as MarkSpan).end;
+  let storedStart = 0;
+  for (let k = 0; k < spanStart; k++) {
+    const ch = text[k];
+    if (ch !== HILITE_OPEN && ch !== HILITE_CLOSE) storedStart += 1;
+  }
+  const seg = text.slice(spanStart, spanEnd).replace(/[\u0001\u0002]/g, "");
+  if (!seg.trim()) return undefined;
+  return { seg, storedStart };
+}
+
+interface RawText {
+  title: string;
+  body: string;
+}
+
+/** Offset shape returned by `offsetsFor`. */
+export interface FtsOffsets {
+  quote: string;
+  start: number;
+  end: number;
+}
+
+/**
+ * Compute verified raw `{ quote, start, end }` for a hit. Reads the hit's
+ * highlighted segmented payload from FTS5 (`highlight(ftable, col, \u0001,
+ * \u0002)` — only meaningful during a MATCH), strips the markers to get the
+ * matched segmented quote, maps it back to RAW document coordinates, and
+ * validates by re-slicing the raw text. Any failure skips offsets (returns
+ * undefined) — a wrong offset is never emitted.
+ */
+function offsetsFor(
+  store: Fts5Store,
+  table: string,
+  match: string,
+  id: string,
+  raw: RawText | undefined
+): FtsOffsets | undefined {
+  if (!raw) return undefined;
+  const rec = store.db
+    .prepare(
+      `SELECT highlight(${table}, 1, ?, ?) AS ht, highlight(${table}, 2, ?, ?) AS hb,
+              title AS st, body AS sb
+       FROM ${table} WHERE ${table} MATCH ? AND id = ?`
+    )
+    .get(HILITE_OPEN, HILITE_CLOSE, HILITE_OPEN, HILITE_CLOSE, match, id) as
+    | { ht: string | null; hb: string | null; st: string | null; sb: string | null }
+    | undefined;
+  if (!rec) return undefined;
+
+  const columns = [
+    { highlight: rec.ht, stored: rec.st ?? "", raw: raw.title },
+    { highlight: rec.hb, stored: rec.sb ?? "", raw: raw.body },
+  ];
+
+  for (const col of columns) {
+    const region = firstMarkedRegion(col.highlight);
+    if (!region) continue;
+    const mapped = mapSegmentedToRaw(col.raw, col.stored);
+    const positions = mapped.slice(
+      region.storedStart,
+      region.storedStart + region.seg.length
+    );
+    const pos: number[] = [];
+    for (const p of positions) {
+      if (p !== null) pos.push(p);
+    }
+    if (pos.length === 0) continue;
+    // The non-space chars of the matched region must map to a CONTIGUOUS raw
+    // stretch (any gap means the region includes content with no raw home, e.g.
+    // an appended synonym, so the offset cannot be trusted).
+    let contiguous = true;
+    for (let k = 1; k < pos.length; k++) {
+      if (pos[k] !== (pos[k - 1] as number) + 1) {
+        contiguous = false;
+        break;
+      }
+    }
+    if (!contiguous) continue;
+    const start = pos[0] as number;
+    const end = (pos[pos.length - 1] as number) + 1;
+    const deSpaced = region.seg.replace(/\s+/g, "");
+    const slice = col.raw.slice(start, end);
+    if (slice !== deSpaced) continue; // reconstruction mismatch -> skip
+    return { quote: slice, start, end };
+  }
+  return undefined;
 }

@@ -142,10 +142,40 @@ thai-fts --json search "ติดตั้ง" --db db.sqlite          # { ok: t
 
 ### FTS5 — `thai-fts/fts5`
 
-- `createFts5Engine({ path?, memory?, tone?, limit?, dictionaries? })` → `ThaiSearchEngine`
-- `openFts5Store({ path?, memory?, dictionaries? })` → `{ db, add, remove, update, rebuild, close, get, allRows }`
-- `fts5Search(store, query, opts?)` → `ThaiSearchResult[]` (dual-channel พร้อม hook `filter`)
+- `createFts5Engine({ path?, memory?, tone?, limit?, prefix?, stopwords? })` → `ThaiSearchEngine`
+- `openFts5Store({ path?, memory?, prefix?, stopwords?, dictionaries? })` → `{ db, add, remove, update, rebuild, close, get, allRows }`
+- `fts5Search(store, query, opts?)` → `ThaiSearchResult[]` (dual-channel พร้อม hook `filter` และ `prefix`/`offsets`/`titleWeight`)
 - `FTS5_STRICT_SCHEMA`, `FTS5_LOOSE_SCHEMA` — DDL ที่คำนึงเครื่องหมาย (`unicode61 categories 'L* N* Co M*'`)
+
+#### ฟีเจอร์ค้นหาแบบเลือกเปิด (ปิดทั้งหมดตามค่าเริ่มต้น)
+
+**Prefix / พิมพ์ค้นหาอัตโนมัติ** — เปิด store พร้อมดัชนี prefix แล้วค้นด้วย `prefix: true` (token สุดท้ายของแต่ละ phrase ได้ `*` ต่อท้ายแบบ FTS5):
+
+```js
+const store = openFts5Store({ memory: true, prefix: [2, 3] });
+fts5Search(store, "ติดตั้งโ", { prefix: true }); // คำที่พิมพ์แค่บางส่วนก็เจอ
+```
+
+**Offsets** — ใช้ `offsets: true` เพิ่ม `quote` / `start` / `end` ที่ตรวจสอบแล้วต่อ hit ในพิกัดเอกสารต้นฉบับ (`raw.slice(start, end) === quote`; ไม่เดา):
+
+```js
+const [hit] = fts5Search(store, "ติดตั้ง", { offsets: true });
+// hit.quote === "ติดตั้ง", hit.start/hit.end เป็น index ของข้อความต้นฉบับ
+```
+
+**ถ่วงน้ำหนัก title** — `titleWeight: N` จัดอันดับด้วย `titleRank * N + bodyRank` ทำให้ผลลัพธ์ที่อยู่ title ชนะผลลัพธ์ที่อยู่ body ได้:
+
+```js
+fts5Search(store, "ติดตั้ง", { titleWeight: 2 });
+```
+
+**Stopwords** — เลือกเปิด (OPT-IN) และสมมาตร: `stopwords: true` (หรือส่ง `string[]` ของตัวเอง) จะตัดคำฟังก์ชันทั้งฝั่งดัชนีและฝั่งคำค้นพร้อมกัน การสลับตัวเลือกนี้เปลี่ยน payload ในดัชนี ดังนั้นฐานข้อมูลแบบไฟล์ที่มีอยู่ต้อง rebuild (`rebuild()` หรือเปิดไฟล์ใหม่):
+
+```js
+const engine = createFts5Engine({ memory: true, stopwords: true });
+engine.add({ id: "x", body: "การติดตั้งโปรแกรม" });
+engine.search("การติดตั้ง"); // เจอ — "การ" ถูกตัดทั้งสองฝั่ง
+```
 
 ## นโยบายวรรณยุกต์
 

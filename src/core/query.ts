@@ -21,10 +21,60 @@
  * chunk-split point, mirroring the index side — so hidden zero-width
  * characters embedded in a query Thai word behave exactly like the same word
  * indexed cleanly, keeping the index and query transforms symmetric.
+ *
+ * ## Opt-in options (TASK-006)
+ *
+ *  - `prefix` (default off): when true, the FINAL token of each phrase gets a
+ *    trailing FTS5 prefix postfix `*` (outside the phrase's closing quote, the
+ *    `"a b"*` form that FTS5 accepts). Only the phrase-final token is starred,
+ *    never a mid-phrase token. Powers autocomplete over a `prefix='n1 n2'`
+ *    index; without such an index the `*` query still matches correctly but
+ *    scans more tokens.
+ *  - `stopwords` (default off): a token list removed from the word lists used
+ *    to build phrases, mirroring the store's index-time `applyStopwords`
+ *    filter so index and query stay symmetric. A chunk whose words are all
+ *    stopwords is dropped entirely. The strict channel uses exact
+ *    (`filterStopwords`) comparison; the loose channel uses the de-accented
+ *    (`filterStopwordsLoose`) comparison.
  */
 import { hasThai, looseForm, normalizeThaiInput, segmentQueryChunk } from "./segment.js";
 import { expandChunkSynonyms } from "./synonyms.js";
+import { filterStopwords, filterStopwordsLoose } from "./stopwords.js";
 import type { BuiltQuery, QueryChunk, ToneMode } from "./types.js";
+
+/** Shared options for the MATCH builders. */
+export interface MatchBuildOptions {
+  /** Append a FTS5 prefix postfix `*` to each phrase's final token. */
+  prefix?: boolean;
+  /** Stopword tokens removed from the word lists before phrase building. */
+  stopwords?: readonly string[];
+}
+
+/** Token-list filter derived from `MatchBuildOptions.stopwords` (may be
+ * undefined = no filtering). Kept as a function so the loose builder can use
+ * the de-accented comparison without double-filtering. */
+type FilterFn = (tokens: readonly string[]) => string[];
+
+function filterFor(opts: MatchBuildOptions | undefined, loose: boolean): FilterFn | undefined {
+  const sw = opts?.stopwords;
+  if (!sw || sw.length === 0) return undefined;
+  return loose ? (ts) => filterStopwordsLoose(ts, sw) : (ts) => filterStopwords(ts, sw);
+}
+
+/** Build a single quoted phrase from tokens. When `prefix` is set, the FTS5
+ * phrase-prefix postfix `*` lands AFTER the closing quote (`"a"*`, `"a b"*` —
+ * the only form FTS5 treats as a prefix query; `"a b*"` would search a literal
+ * `b*` token and match nothing). Returns null when filtering leaves no tokens. */
+function buildPhrase(
+  words: readonly string[],
+  filter: FilterFn | undefined,
+  prefix: boolean
+): string | null {
+  const list = filter ? filter(words) : words;
+  if (list.length === 0) return null;
+  const inner = list.map((t) => quoteFtsToken(t)).join(" ");
+  return `"${inner}"${prefix ? "*" : ""}`;
+}
 
 /** Escape one token for use inside a quoted FTS5 phrase: backslashes doubled,
  * double-quotes doubled (FTS5 quote-escape convention). */
@@ -32,34 +82,40 @@ export function quoteFtsToken(t: string): string {
   return t.replace(/\\/g, "\\\\").replace(/"/g, '""');
 }
 
-export function buildFtsMatch(query: string): string {
+export function buildFtsMatch(query: string, opts?: MatchBuildOptions): string {
   const chunks = normalizeThaiInput(query).trim().split(/\s+/).filter(Boolean).slice(0, 8);
-  return chunks
-    .map((chunk) => {
-      // A Thai chunk becomes an FTS5 phrase of its words: "ติด ตั้ง เร็ว"
-      // matches the words in order, mirroring how the index was segmented.
-      // Thai chunks are NEVER OR-expanded here (even when the chunk is a known
-      // synonym): buildFtsMatch("ติดตั้ง") must stay a single ordered phrase,
-      // and the TH->EN bridge is already covered at index time
-      // (expandIndexedText) plus the ASCII-chunk expansion below.
-      const words = hasThai(chunk) ? segmentQueryChunk(chunk) : [chunk];
-      const phrase = (words.length > 0 ? words : [chunk]).map(quoteFtsToken).join(" ");
-      const base = `"${phrase}"`;
-      if (hasThai(chunk)) return base;
-      // Known ASCII chunk: OR the transliteration counterpart phrase(s) in, so
-      // e.g. `deploy` also matches the Thai "ดี พลอย" token stream.
-      const variants = expandChunkSynonyms(chunk);
-      if (variants.length <= 1) return base;
-      const alternatives = variants
-        .slice(1)
-        .map((v) => {
-          const vw = hasThai(v) ? segmentQueryChunk(v) : [v];
-          const vp = (vw.length > 0 ? vw : [v]).map(quoteFtsToken).join(" ");
-          return `"${vp}"`;
-        });
-      return [base, ...alternatives].join(" OR ");
-    })
-    .join(" OR ");
+  const filter = filterFor(opts, false);
+  const prefix = opts?.prefix === true;
+  const out: string[] = [];
+  for (const chunk of chunks) {
+    const thai = hasThai(chunk);
+    const words = thai ? segmentQueryChunk(chunk) : [chunk];
+    const base = buildPhrase(words, filter, prefix);
+    if (!base) continue;
+    // A Thai chunk becomes a single ordered FTS5 phrase, NEVER OR-expanded here
+    // (even when the chunk is a known synonym): buildFtsMatch("ติดตั้ง") must
+    // stay one ordered phrase, and the TH->EN bridge is already covered at
+    // index time (expandIndexedText) plus the ASCII-chunk expansion below.
+    if (thai) {
+      out.push(base);
+      continue;
+    }
+    // Known ASCII chunk: OR the transliteration counterpart phrase(s) in, so
+    // e.g. `deploy` also matches the Thai "ดี พลอย" token stream.
+    const variants = expandChunkSynonyms(chunk);
+    if (variants.length <= 1) {
+      out.push(base);
+      continue;
+    }
+    const parts: string[] = [base];
+    for (const v of variants.slice(1)) {
+      const vw = hasThai(v) ? segmentQueryChunk(v) : [v];
+      const vp = buildPhrase(vw, filter, prefix);
+      if (vp) parts.push(vp);
+    }
+    out.push(parts.join(" OR "));
+  }
+  return out.join(" OR ");
 }
 
 /**
@@ -74,29 +130,43 @@ export function buildFtsMatch(query: string): string {
  * is only a lowercase, so buildLooseFtsMatch ≡ buildFtsMatch's match set (FTS5
  * case-folds) and the loose channel adds nothing.
  */
-export function buildLooseFtsMatch(query: string): string {
+export function buildLooseFtsMatch(query: string, opts?: MatchBuildOptions): string {
   const chunks = normalizeThaiInput(query).trim().split(/\s+/).filter(Boolean).slice(0, 8);
-  return chunks
-    .map((chunkRaw) => {
-      const chunk = looseForm(chunkRaw);
-      const thai = hasThai(chunk);
-      const words = thai ? segmentQueryChunk(chunk) : [chunk];
-      const phrase = (words.length > 0 ? words : [chunk]).map(quoteFtsToken).join(" ");
-      const base = `"${phrase}"`;
-      if (thai) return base;
-      const variants = expandChunkSynonyms(chunk);
-      if (variants.length <= 1) return base;
-      const alternatives = variants
-        .slice(1)
-        .map((v) => {
-          const vl = looseForm(v);
-          const vw = hasThai(vl) ? segmentQueryChunk(vl) : [vl];
-          const vp = (vw.length > 0 ? vw : [vl]).map(quoteFtsToken).join(" ");
-          return `"${vp}"`;
-        });
-      return [base, ...alternatives].join(" OR ");
-    })
-    .join(" OR ");
+  // Stopword filtering on the loose side compares in de-accented form, so a
+  // tone-mark typo in a stopword still drops the same token the index removed.
+  const filter = filterFor(opts, true);
+  const prefix = opts?.prefix === true;
+  const out: string[] = [];
+  for (const chunkRaw of chunks) {
+    const chunk = looseForm(chunkRaw);
+    const thai = hasThai(chunk);
+    const words = thai ? segmentQueryChunk(chunk) : [chunk];
+    const base = buildPhrase(words, filter, prefix);
+    if (!base) continue;
+    if (thai) {
+      out.push(base);
+      continue;
+    }
+    const variants = expandChunkSynonyms(chunk);
+    if (variants.length <= 1) {
+      out.push(base);
+      continue;
+    }
+    const parts: string[] = [base];
+    for (const v of variants.slice(1)) {
+      const vl = looseForm(v);
+      const vw = hasThai(vl) ? segmentQueryChunk(vl) : [vl];
+      const vp = buildPhrase(vw, filter, prefix);
+      if (vp) parts.push(vp);
+    }
+    out.push(parts.join(" OR "));
+  }
+  return out.join(" OR ");
+}
+
+/** Options accepted by `buildSearchQuery`. `mode` + the MATCH-builder opts. */
+export interface SearchQueryOptions extends MatchBuildOptions {
+  mode?: ToneMode;
 }
 
 /**
@@ -104,13 +174,17 @@ export function buildLooseFtsMatch(query: string): string {
  * into its whitespace-delimited chunks (max 8, like the builders), analyze each
  * chunk, and return both the strict and the loose MATCH expressions alongside.
  * `mode` is the resolved tone mode (defaults to "both" / strict-first) so an
- * adapter can pick a channel without re-deriving policy.
+ * adapter can pick a channel without re-deriving policy. `prefix`/`stopwords`
+ * are threaded into both match expressions (see `MatchBuildOptions`).
  */
 export function buildSearchQuery(
   query: string,
-  mode?: ToneMode | { mode?: ToneMode }
+  opts?: ToneMode | SearchQueryOptions
 ): BuiltQuery {
-  const tone = resolveTone(mode);
+  const tone = resolveTone(opts);
+  const objectOpts = typeof opts === "object" && opts !== null ? (opts as SearchQueryOptions) : undefined;
+  const prefix = objectOpts?.prefix;
+  const stopwords = objectOpts?.stopwords;
   const chunkTexts = normalizeThaiInput(query).trim().split(/\s+/).filter(Boolean).slice(0, 8);
   const chunks: QueryChunk[] = chunkTexts.map((raw) => {
     const thai = hasThai(raw);
@@ -121,8 +195,8 @@ export function buildSearchQuery(
   return {
     mode: tone,
     chunks,
-    match: buildFtsMatch(query),
-    looseMatch: buildLooseFtsMatch(query),
+    match: buildFtsMatch(query, { prefix, stopwords }),
+    looseMatch: buildLooseFtsMatch(query, { prefix, stopwords }),
   };
 }
 

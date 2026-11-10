@@ -56,3 +56,19 @@ test("PRAGMA table_info exposes the declared columns", () => {
   );
   store.close();
 });
+
+test("prefix indexes ([2, 3]) are baked into both created FTS tables", () => {
+  const store = openFts5Store({ memory: true, prefix: [2, 3] });
+  for (const name of ["fts5_strict", "fts5_loose"]) {
+    const row = store.db
+      .prepare("SELECT sql FROM sqlite_master WHERE name = ?")
+      .get(name);
+    assert.ok(row && typeof row.sql === "string", `${name} SQL not found`);
+    assert.match(
+      row.sql,
+      /prefix = '2 3'/,
+      `expected a prefix clause in ${name}: ${row.sql}`
+    );
+  }
+  store.close();
+});

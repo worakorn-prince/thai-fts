@@ -25,10 +25,11 @@
 import { DatabaseSync } from "node:sqlite";
 import { expandIndexedText } from "../../core/synonyms.js";
 import { looseForm, segmentForIndex } from "../../core/segment.js";
+import { applyStopwords, THAI_DEFAULT_STOPWORDS } from "../../core/stopwords.js";
 import { registerThaiDictionary } from "../../core/dictionaries.js";
 import type { ThaiDictionaryDef } from "../../core/types.js";
 import type { ThaiSearchDoc } from "../engine.js";
-import { FTS5_LOOSE_SCHEMA, FTS5_STRICT_SCHEMA } from "./schema.js";
+import { buildLooseSchema, buildStrictSchema } from "./schema.js";
 
 /** Options for opening a memory- or file-backed FTS5 store. */
 export interface OpenFts5StoreOptions {
@@ -41,6 +42,18 @@ export interface OpenFts5StoreOptions {
    * `registerThaiDictionary`). Registers are global to the core registry, so
    * this is a convenience for wiring them in one call. */
   dictionaries?: readonly ThaiDictionaryDef[];
+  /** FTS5 prefix-index lengths (e.g. `[2, 3]` → `prefix='2 3'`) on both
+   * channels, powering autocomplete `*` queries. Only affects tables created
+   * at this open; opening an existing file DB with a different `prefix` does
+   * not rebuild it (call `rebuild()` or reopen a fresh database). */
+  prefix?: readonly number[];
+  /** Opt-in symmetric stopword filtering. `true` uses the curated
+   * `THAI_DEFAULT_STOPWORDS`; a string[] uses that exact list; `false`/absent
+   * disables it. Stopword tokens are removed from the indexed payload on BOTH
+   * channels, and search applies the same filter to query phrases. **Enabling
+   * this changes the indexed payload — existing on-disk databases must be
+   * rebuilt** (re-index via `rebuild()` or recreate the file). Default off. */
+  stopwords?: boolean | readonly string[];
 }
 
 /** A row of raw document text as returned by the store. */
@@ -57,6 +70,9 @@ export interface Fts5Store {
   readonly type: "fts5";
   /** The underlying `node:sqlite` DatabaseSync handle. */
   readonly db: DatabaseSync;
+  /** The resolved stopword list this store was opened with (empty = off).
+   * Search reads it to keep query-side filtering symmetric with the index. */
+  readonly stopwords: readonly string[];
   /** Index (or re-index) a document on both channels; replaces any prior row
    * with the same id atomically. Uses registered Thai dictionaries if any. */
   add(doc: ThaiSearchDoc): void;
@@ -112,9 +128,20 @@ export function openFts5Store(opts: OpenFts5StoreOptions = {}): Fts5Store {
   for (const pragma of DEFAULT_PRAGMAS) db.exec(pragma);
   if (!isMemory) db.exec("PRAGMA journal_mode = WAL");
 
+  // Prefix indexes + stopword list are fixed at open time. Applying stopwords
+  // changes the indexed payload, so documents must be re-indexed (rebuild) if
+  // this option toggles on an existing on-disk database.
+  const prefix = opts.prefix;
+  const stopwords: readonly string[] =
+    opts.stopwords === undefined || opts.stopwords === false
+      ? []
+      : opts.stopwords === true
+        ? THAI_DEFAULT_STOPWORDS
+        : [...opts.stopwords];
+
   db.exec(DOCUMENTS_DDL);
-  db.exec(FTS5_STRICT_SCHEMA);
-  db.exec(FTS5_LOOSE_SCHEMA);
+  db.exec(buildStrictSchema(prefix));
+  db.exec(buildLooseSchema(prefix));
 
   for (const def of opts.dictionaries ?? []) {
     registerThaiDictionary(def);
@@ -156,12 +183,15 @@ export function openFts5Store(opts: OpenFts5StoreOptions = {}): Fts5Store {
     const title = String(doc.title ?? "");
     const body = String(doc.body ?? "");
     // Index-time transform chain (mirrors the core's documented pipeline):
-    // segmentThai -> expand synonyms -> store the mark-aware payload strict,
-    // and looseForm of THAT SAME payload on the loose channel, so query and
-    // index sides always agree. expandIndexedText + looseForm are byte
-    // idempotent, so re-indexing an already-indexed id is a fixed point.
-    const strictTitle = expandIndexedText(segmentForIndex(title));
-    const strictBody = expandIndexedText(segmentForIndex(body));
+    // segmentThai -> expand synonyms -> stopword filter (when enabled) -> store
+    // the mark-aware payload strict, and looseForm of THAT SAME payload on the
+    // loose channel, so query and index sides always agree. expandIndexedText,
+    // applyStopwords and looseForm are byte idempotent, so re-indexing an
+    // already-indexed id is a fixed point. When stopwords is empty (default)
+    // applyStopwords returns the payload verbatim, keeping the pipeline
+    // byte-identical to the no-stopword path.
+    const strictTitle = applyStopwords(expandIndexedText(segmentForIndex(title)), stopwords);
+    const strictBody = applyStopwords(expandIndexedText(segmentForIndex(body)), stopwords);
     delStrict.run(id);
     delLoose.run(id);
     upsertDoc.run(id, isNum, title, body);
@@ -182,6 +212,7 @@ export function openFts5Store(opts: OpenFts5StoreOptions = {}): Fts5Store {
   const store: Fts5Store = {
     type: "fts5",
     db,
+    stopwords,
     add(doc: ThaiSearchDoc): void {
       assertOpen();
       db.exec("BEGIN");

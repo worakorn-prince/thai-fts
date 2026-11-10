@@ -5,7 +5,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 
-const { openFts5Store, fts5Search } = await import("../../dist/index.js");
+const { openFts5Store, fts5Search, createFts5Engine } = await import("../../dist/index.js");
 
 // ICU segmentation is optional (small-icu runtimes); Thai assertions skip then.
 const skip = typeof Intl.Segmenter !== "function";
@@ -257,4 +257,109 @@ test("optional filter hook applies per candidate and does not starve in-scope hi
   assert.ok(!ids.includes(1), "filtered-out row must not appear");
   assert.equal(ids.length, 2, `filter applied before limit: ${ids}`);
   store.close();
+});
+
+// TASK-006 opt-in search features (all default off): prefix autocomplete, raw
+// offsets, titleWeight ranking, and symmetric index+query stopwords.
+test("prefix: partial word with prefix:true isolates the ติดตั้ง-only doc", { skip }, () => {
+  const store = openFts5Store({ memory: true, prefix: [2, 3] });
+  store.add({ id: "a", body: "ต้องติดตั้งโปรแกรมใหม่" });
+  store.add({ id: "b", body: "ติดตังค่าบริการ" });
+  // 3+ Thai chars run the FTS prefix path: the phrase's final token gets a
+  // trailing `*`, so the prefix "ติดตั้งโ" matches ติดตั้งแต่ไม่ใช่ติดตัง.
+  assert.deepEqual(
+    fts5Search(store, "ติดตั้งโ", { tone: "strict", prefix: true }).map((r) => r.id),
+    ["a"],
+    "prefix search must find only the ติดตั้ง doc"
+  );
+  store.close();
+});
+
+test("prefix: without prefix:true a partial word matches nothing (exact phrase)", { skip }, () => {
+  const store = openFts5Store({ memory: true, prefix: [2, 3] });
+  store.add({ id: "a", body: "ต้องติดตั้งโปรแกรมใหม่" });
+  store.add({ id: "b", body: "ติดตังค่าบริการ" });
+  // No `*`: the phrase's final token must be an EXACT token. No document holds a
+  // standalone "โ" token, so the partial word must not match in exact mode.
+  assert.deepEqual(
+    fts5Search(store, "ติดตั้งโ", { tone: "strict" }),
+    [],
+    "exact (no-prefix) mode must not match a partial word"
+  );
+  store.close();
+});
+
+test("prefix: a shared short prefix matches both docs (LIKE width)", { skip }, () => {
+  const store = openFts5Store({ memory: true, prefix: [2, 3] });
+  store.add({ id: "a", body: "ต้องติดตั้งโปรแกรมใหม่" });
+  store.add({ id: "b", body: "ติดตังค่าบริการ" });
+  // "ติ" is a 1-char Thai query → the LIKE fallback runs; both docs contain
+  // "ติ" so both match. Assert length 2 only — never pin the rowid order.
+  const res = fts5Search(store, "ติ", { tone: "strict", prefix: true });
+  assert.equal(res.length, 2, `short prefix should match both docs: ${JSON.stringify(res)}`);
+  assert.ok(
+    res.some((r) => r.id === "a") && res.some((r) => r.id === "b"),
+    "both docs start with ติ"
+  );
+  store.close();
+});
+
+test("offsets: raw quote/start/end validated against the source text", { skip }, () => {
+  const body = "คู่มือติดตั้งโปรแกรม และติดตั้งใหม่";
+  const store = openFts5Store({ memory: true });
+  store.add({ id: "d", body });
+  const [hit] = fts5Search(store, "ติดตั้ง", { tone: "strict", offsets: true });
+  assert.equal(hit.id, "d");
+  assert.equal(hit.quote, "ติดตั้ง");
+  assert.equal(typeof hit.start, "number", "start must be a raw coordinate number");
+  assert.equal(typeof hit.end, "number", "end must be a raw coordinate number");
+  assert.ok(hit.start < hit.end, `valid span ${hit.start}..${hit.end}`);
+  // RAW coordinate invariant: re-slicing the raw body reproduces the quote
+  // (no inserted segmentation spaces).
+  assert.equal(body.slice(hit.start, hit.end), hit.quote);
+  store.close();
+});
+
+test("titleWeight: default ranks the body-only hit first; weight 2 flips to the title hit", { skip }, () => {
+  const store = storeWith(
+    { id: "t", title: "ติดตั้งยืนยันขั้นตอนการทำงานอย่างละเอียด", body: "เนื้อหายาวมาก" },
+    { id: "b", title: "บทความอื่น", body: "ติดตั้ง" }
+  );
+  const def = fts5Search(store, "ติดตั้ง", { tone: "strict" }).map((r) => r.id);
+  assert.deepEqual(def, ["b", "t"], "without weighting the body-only hit ranks 1");
+  const weighted = fts5Search(store, "ติดตั้ง", {
+    tone: "strict",
+    titleWeight: 2,
+  }).map((r) => r.id);
+  assert.deepEqual(weighted, ["t", "b"], "titleWeight must lift the title hit to rank 1");
+  store.close();
+});
+
+test("stopwords: symmetric index+query removal matches through the engine", { skip }, () => {
+  const on = createFts5Engine({ memory: true, stopwords: true });
+  on.add({ id: "s", body: "การติดตั้งโปรแกรม" });
+  assert.deepEqual(
+    on.search("การติดตั้ง", { tone: "strict" }).map((r) => r.id),
+    ["s"],
+    "the query-side filter drops การ exactly like the index did"
+  );
+  assert.deepEqual(
+    on.search("ติดตั้ง", { tone: "strict" }).map((r) => r.id),
+    ["s"],
+    "the plain-word query still matches after การ was removed at index time"
+  );
+  on.close();
+});
+
+test("stopwords: default (off) stays symmetric — neither side drops การ", { skip }, () => {
+  const off = createFts5Engine({ memory: true });
+  off.add({ id: "s", body: "การติดตั้งโปรแกรม" });
+  // Stopwords are opt-in. With the feature off, neither the index nor the query
+  // removes การ, so the phrase still matches (symmetric-keep on both sides).
+  assert.deepEqual(
+    off.search("การติดตั้ง", { tone: "strict" }).map((r) => r.id),
+    ["s"],
+    "off path keeps tokens on both sides, so the phrase matches"
+  );
+  off.close();
 });
