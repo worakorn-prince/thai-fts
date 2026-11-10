@@ -172,6 +172,10 @@ matching only; `tone: "both"` (default) is the two-tier merge above. Short
 (1–2 char) pure-Thai queries use a LIKE fallback instead of FTS phrases and
 report `meta.method: "like_fallback"`.
 
+Note: the 1–2 char LIKE fallback scans the raw documents (not the de-accented
+channel), so a tone typo in a 1–2-char query can't be rescued there; tone-typo
+rescue via the loose channel applies to longer (3+ char) queries.
+
 ## Dictionaries
 
 Registration is additive on top of the built-in dev/tech defaults
@@ -187,6 +191,14 @@ registerThaiDictionary({
   overrides: [{ term: "โปรเจกต์", fixed: "โปรเจกต์" }],
 });
 ```
+
+**Module instances & subpaths:** each build subpath (`thai-fts`, `thai-fts/core`,
+…) is its own module instance, so the global dictionary registry is per-instance.
+For an engine, pass dictionaries to `createFts5Engine({ dictionaries: [...] })`
+(or `openFts5Store`) — self-contained, no global state needed (recommended).
+For pure core use, import `registerThaiDictionary` **and** every function that
+consumes it (segmentation/synonyms) from the **same** entry/subpath (all from
+`"thai-fts"`, or all from `"thai-fts/core"`), so they share one module instance.
 
 ## Adapters roadmap
 

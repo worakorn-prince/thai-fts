@@ -221,15 +221,19 @@ function likeFallback(
   limit: number,
   filter?: Fts5SearchOptions["filter"]
 ): ThaiSearchResult[] {
+  // Read a bounded slice per scan: an optional `filter` may reject rows, so the
+  // bound sits a little above `limit` (dedup and the second loose scan absorb
+  // the excess) while the LIKE read itself stays bounded.
+  const scanLimit = limit * 2 + 16;
   const scan = (needle: string): ChannelRow[] => {
     const like = `%${likeEscape(needle)}%`;
     const rows = store.db
       .prepare(
         `SELECT id, is_num, title, body FROM documents
          WHERE title LIKE ? ESCAPE '\\' OR body LIKE ? ESCAPE '\\'
-         ORDER BY rowid`
+         ORDER BY rowid LIMIT ?`
       )
-      .all(like, like) as unknown as ChannelRow[];
+      .all(like, like, scanLimit) as unknown as ChannelRow[];
     return rows;
   };
   const collect = (needle: string, out: ThaiSearchResult[], seen: Set<string>): void => {

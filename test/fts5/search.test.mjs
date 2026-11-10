@@ -154,6 +154,58 @@ test("like_fallback for 1-2 char pure-Thai queries (never silent)", { skip }, ()
   store.close();
 });
 
+test("like_fallback read is bounded by a SQL LIMIT (and respects limit)", { skip }, () => {
+  // 50 docs match the 2-char Thai query "ตา" (2 Thai chars → LIKE fallback).
+  // The scan must cap its read just above `limit` and hand back exactly
+  // `limit` rows, not the whole matching set.
+  const docs = Array.from({ length: 50 }, (_, i) => ({
+    id: `d${i}`,
+    body: `ตารางที่ ${i} ค่าบริการ`,
+  }));
+  const store = openFts5Store({ memory: true });
+  for (const d of docs) store.add(d);
+
+  // Spy on the LIKE scan to record its SQL and the bound it binds.
+  const likeScans = [];
+  const origPrepare = store.db.prepare.bind(store.db);
+  store.db.prepare = (sql) => {
+    const stmt = origPrepare(sql);
+    if (sql.includes("ESCAPE")) {
+      const origAll = stmt.all.bind(stmt);
+      stmt.all = (...args) => {
+        likeScans.push({ sql, args });
+        return origAll(...args);
+      };
+    }
+    return stmt;
+  };
+
+  const res = fts5Search(store, "ตา", { tone: "both", limit: 5 });
+  assert.equal(res.length, 5, `limit 5 must return exactly 5 of 50 matches: ${res.length}`);
+  assert.ok(res.every((r) => r.meta?.method === "like_fallback"));
+  assert.ok(likeScans.length > 0, "the LIKE scan must run");
+  assert.ok(
+    likeScans.every((s) => /LIMIT \?/i.test(s.sql)),
+    "the LIKE scan must carry a SQL LIMIT"
+  );
+  assert.ok(
+    likeScans.every((s) => s.args[s.args.length - 1] === 5 * 2 + 16),
+    `like scan must bind limit*2+16 (26), got: ${JSON.stringify(likeScans.map((s) => s.args))}`
+  );
+  store.close();
+
+  // Fewer matches than limit: return as many as are available (all of them).
+  const few = openFts5Store({ memory: true });
+  for (const d of docs.slice(0, 3)) few.add(d);
+  const resFew = fts5Search(few, "ตา", { tone: "both", limit: 10 });
+  assert.deepEqual(
+    resFew.map((r) => r.id),
+    ["d0", "d1", "d2"],
+    `fewer matches than limit should return all of them: ${JSON.stringify(resFew.map((r) => r.id))}`
+  );
+  few.close();
+});
+
 test("adversarial MATCH inputs never throw", () => {
   const store = storeWith(
     { id: 1, body: "deploy release v1" },

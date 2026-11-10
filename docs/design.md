@@ -100,7 +100,10 @@ for future adapters.
 
 **Short-query policy:** 1–2 character pure-Thai queries are unreliable as FTS
 phrases, so `fts5Search` switches to a SQL `LIKE` scan (escaped) reported as
-`meta.method: "like_fallback"` — never a silent empty result.
+`meta.method: "like_fallback"` — never a silent empty result. The LIKE scan
+reads the raw documents (not the de-accented loose channel), so a tone typo in
+a 1–2-char query can't be rescued there — tone-typo rescue via the loose
+channel applies to longer (3+ char) queries.
 
 ## 5. Strict-primary + loose fallback (dual-channel merge)
 
@@ -136,6 +139,16 @@ pure and never import the registry:
 
 Built-in dev/tech defaults (`THAI_DEFAULT_WORDS`, `THAI_DEFAULT_SYNONYMS`)
 are always active underneath; registered dictionaries only add on top.
+
+**Module instances & subpaths:** the build emits one bundle per subpath
+(`thai-fts`, `thai-fts/core`, …), and each bundle is a separate module instance,
+so the global registry is per-instance. Two correct usage patterns:
+
+1. **Engine (recommended):** pass dictionaries to `createFts5Engine({ dictionaries:
+   [...] })` / `openFts5Store` — self-contained, no global state.
+2. **Pure core:** import `registerThaiDictionary` and all consuming functions
+   from the same entry/subpath (all `"thai-fts"`, or all `"thai-fts/core"`) so
+   they share one instance.
 
 ## 7. Engine adapter interface
 
