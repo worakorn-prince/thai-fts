@@ -8,5 +8,7 @@ export * from "./synonyms.js";
 export * from "./stopwords.js";
 export * from "./query.js";
 export * from "./dictionaries.js";
+export * from "./seeds/legal.js";
+export * from "./seeds/literary.js";
 export * from "./tone.js";
 export * from "./types.js";

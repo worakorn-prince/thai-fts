@@ -145,6 +145,12 @@ setThaiSegmenter({
 setThaiSegmenter(null);
 ```
 
+A runnable worked example (HTTP bridge to a local **PyThaiNLP** service + a
+synchronous dictionary stub + restore) lives in
+[`examples/segmenter-bridge.mjs`](examples/segmenter-bridge.mjs) — not shipped
+in the npm package, but a faithful starting point for an attacut-wasm or
+PyThaiNLP integration: `node examples/segmenter-bridge.mjs`.
+
 **Synonyms** (`synonyms.ts`) — TH↔EN transliteration/semantic synonyms
 
 - `expandSynonyms(term)` → `string[]` — term + every known counterpart
@@ -258,6 +264,22 @@ For pure core use, import `registerThaiDictionary` **and** every function that
 consumes it (segmentation/synonyms) from the **same** entry/subpath (all from
 `"thai-fts"`, or all from `"thai-fts/core"`), so they share one module instance.
 
+**Domain seed lists** — three ready-to-use exports cover the curated vocabulary:
+
+- `THAI_DEFAULT_WORDS` — the combined default (dev/tech + general + modest
+  legal/literary subset, ~1.4k entries), always active underneath;
+- `THAI_LEGAL_WORDS` — a curated legal-domain list (procedures, persons,
+  instruments, enforcement);
+- `THAI_LITERARY_WORDS` — a curated literary-domain list (genres, prosody,
+  figures of speech).
+
+For a legal or literary app, load just your domain on top of the defaults:
+
+```js
+import { registerThaiDictionary, THAI_LEGAL_WORDS } from "thai-fts";
+registerThaiDictionary({ id: "legal", words: THAI_LEGAL_WORDS });
+```
+
 **Loading a domain word list from a file** — `loadThaiWordsFromText` splits a
 free-form list (newlines/spaces), trims, and dedupes, so you can ship a plain
 word file per domain (legal, literary, …):
@@ -273,7 +295,7 @@ registerThaiDictionary({ id: "legal-app", words });
 Prefer `words` when a term should simply be kept as **one forced token** (the
 most common case for compounds/names), and `overrides` only to **re-map** a
 specific segmented term to a different fixed token (`{ term, fixed }`).
-`THAI_DEFAULT_WORDS` (~1.3k entries incl. legal/literary seeds) and
+`THAI_DEFAULT_WORDS` (1,368 entries incl. legal/literary seeds) and
 `THAI_DEFAULT_SYNONYMS` (38 pairs) are always active underneath.
 
 ## Adapters roadmap

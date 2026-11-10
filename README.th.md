@@ -111,6 +111,11 @@ thai-fts --json search "ติดตั้ง" --db db.sqlite          # { ok: t
 - `segmentQueryChunk(chunk)` → `string[]` — คำภายในหนึ่ง chunk ที่คั่นด้วยช่องว่าง
 - `hasThai(text)` → `boolean`
 - `looseForm(text)` → `string` — ตัดเฉพาะเครื่องหมายระดับวรรณยุกต์ `่ ้ ๊ ๋ ์ ํ` แต่คงสระไว้ครบ
+- `normalizeThaiInput(text)` → `string` — NFC + ลบ zero-width chars, idempotent (เรียกให้อัตโนมัติทุกเส้นทางตัดคำ/คำค้น)
+- `setThaiSegmenter(segmenter)` — ต่อ segmenter ไทยภายนอก (เช่น wasm attacut หรือ PyThaiNLP ผ่าน RPC); ส่ง `null` เพื่อกลับสู่การจับคู่ค่าอัตโนมัติ
+- `getThaiSegmenterInfo()` → `{ source: "intl" | "custom" | "dict" | "none", hasSegmenter }`
+
+**การต่อ segmenter ภายนอก** — วัตถุใดก็ตามที่เข้ารูป `Intl.Segmenter` (มีเมธอด `.segment(text)` คืน iterable ของ `{ segment, isWordLike? }`) แทนที่ตัวตัดคำในตัวได้ ตัวอย่างรันจริง (HTTP bridge ไปบริการ PyThaiNLP ล้อคัล + สตัมพจนานุกรมแบบซิงโครนัส + การคืนค่าเดิม) อยู่ใน [`examples/segmenter-bridge.mjs`](examples/segmenter-bridge.mjs) — ไม่ถูกแพ็กใน npm แต่ใช้เป็นจุดเริ่มต้นของการต่อ attacut/PyThaiNLP ได้ทันที: `node examples/segmenter-bridge.mjs`
 
 **คำพ้อง** (`synonyms.ts`) — คำพ้องเสียง/ความหมายแบบทับศัพท์ ไทย↔อังกฤษ
 
@@ -205,6 +210,19 @@ registerThaiDictionary({
 
 **โมดูลอินสแตนซ์กับซับพาธ:** แต่ละซับพาธที่บิลด์ (`thai-fts`, `thai-fts/core`, …) เป็นโมดูลอินสแตนซ์แยกกัน ทะเบียนพจนานุกรมจึงเป็นแบบ per-instance กรณีใช้เอนจิน ให้ส่งพจนานุกรมผ่าน `createFts5Engine({ dictionaries: [...] })` (หรือ `openFts5Store`) — ครบในตัวเอง ไม่ต้องพึ่ง global state (แนะนำ) กรณีใช้ core โดยตรง ต้อง import `registerThaiDictionary` พร้อมกับทุกฟังก์ชันที่ใช้มัน (การตัดคำ/คำพ้อง) จาก entry/ซับพาธ **เดียวกัน** (มาจาก `"thai-fts"` ทั้งหมด หรือ `"thai-fts/core"` ทั้งหมด) เพื่อให้แชร์โมดูลอินสแตนซ์เดียวกัน
 
+**รายการคำ seed ต่อโดเมน** — มี 3 การส่งออกพร้อมใช้ครอบคลุมคำศัพท์ที่คัดเลือกแล้ว:
+
+- `THAI_DEFAULT_WORDS` — ชุดรวมค่าเริ่มต้น (dev/tech + ทั่วไป + ชุดย่อยกฎหมาย/วรรณกรรม, ~1.4k คำ) เปิดใช้อยู่ข้างใต้เสมอ
+- `THAI_LEGAL_WORDS` — ชุดศัพท์สายกฎหมาย (ขั้นตอน, บุคคล, เอกสาร, การบังคับคดี)
+- `THAI_LITERARY_WORDS` — ชุดศัพท์สายวรรณกรรม (ประเภทวรรณกรรม, ฉันทลักษณ์, อุปลักษณ์)
+
+แอปสายกฎหมาย/วรรณกรรมโหลดเฉพาะโดเมนทับบนค่าเริ่มต้นได้ทันที:
+
+```js
+import { registerThaiDictionary, THAI_LEGAL_WORDS } from "thai-fts";
+registerThaiDictionary({ id: "legal", words: THAI_LEGAL_WORDS });
+```
+
 **โหลดรายการคำจากไฟล์ (word list ต่อโดเมน)** — `loadThaiWordsFromText` แยกคำจากข้อความอิสระ (คั่นด้วยบรรทัดใหม่/เว้นวรรค), ตัดช่องว่างและตัดรายการซ้ำ ให้ใช้ไฟล์คำธรรมดาต่อโดเมน (กฎหมาย, วรรณกรรม, …) ได้ทันที:
 
 ```js
@@ -215,7 +233,7 @@ const words = loadThaiWordsFromText(await readFile("legal-words.txt", "utf8"));
 registerThaiDictionary({ id: "legal-app", words });
 ```
 
-ใช้ `words` เมื่อต้องการให้คำนั้นถูกบังคับให้เป็น **หนึ่งโทเคน** (กรณีทั่วไปสำหรับคำประสม/ชื่อเฉพาะ) และใช้ `overrides` เฉพาะเมื่อต้อง **รีแมป** คำที่ถูกตัดแล้วไปเป็นโทเคนตายตัวอื่น (`{ term, fixed }`) ส่วน `THAI_DEFAULT_WORDS` (~1.3k คำ รวม seed กฎหมาย/วรรณกรรม) และ `THAI_DEFAULT_SYNONYMS` (38 คู่) ทำงานอยู่ข้างใต้เสมอ
+ใช้ `words` เมื่อต้องการให้คำนั้นถูกบังคับให้เป็น **หนึ่งโทเคน** (กรณีทั่วไปสำหรับคำประสม/ชื่อเฉพาะ) และใช้ `overrides` เฉพาะเมื่อต้อง **รีแมป** คำที่ถูกตัดแล้วไปเป็นโทเคนตายตัวอื่น (`{ term, fixed }`) ส่วน `THAI_DEFAULT_WORDS` (1,368 คำ รวม seed กฎหมาย/วรรณกรรม) และ `THAI_DEFAULT_SYNONYMS` (38 คู่) ทำงานอยู่ข้างใต้เสมอ
 
 ## แผนงานอะแดปเตอร์
 
