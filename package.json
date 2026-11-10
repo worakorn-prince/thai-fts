@@ -43,7 +43,7 @@
   },
   "scripts": {
     "build": "tsup",
-    "test": "npm run build && node --test test/*.test.mjs",
+    "test": "npm run build && node --test test",
     "pack:check": "npm pack --dry-run",
     "prepublishOnly": "npm run build && npm test"
   },
