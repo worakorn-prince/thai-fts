@@ -262,3 +262,23 @@ test("fallback dict: legal & literary sentences segment without dropping charact
     resetSegmenter();
   }
 });
+
+test("QA: extreme inputs never throw and stay idempotent (combining-marks-only, emoji, controls, long run)", () => {
+  const cases = [
+    "\u0E31\u0E48", // combining marks only (สระ+วรรณยุกต์ without base)
+    "\u0E48\u0E49\u0E4A", // tone marks only
+    "ไทย 🙏 กับแมว🐱", // Thai + emoji + ZWJ-ish
+    "a\u0000b\u0007c", // control chars
+    "ติดตั้ง".repeat(20000), // long run (40k+ chars)
+    "  ", // whitespace only
+    "\u200B\u200B\u200B", // zero-width only (already handled by normalize)
+    "กลางคืน \t แถว  \n บ้าน",
+  ];
+  for (const c of cases) {
+    assert.doesNotThrow(() => wordTokens(c), `wordTokens(${JSON.stringify(c.slice(0, 20))})`);
+    assert.doesNotThrow(() => segmentForIndex(c), `segmentForIndex(${JSON.stringify(c.slice(0, 20))})`);
+    assert.doesNotThrow(() => looseForm(c));
+    const once = segmentForIndex(c);
+    assert.equal(segmentForIndex(once), once, "must stay byte-idempotent");
+  }
+});

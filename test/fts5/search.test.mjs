@@ -363,3 +363,63 @@ test("stopwords: default (off) stays symmetric — neither side drops การ"
   );
   off.close();
 });
+
+// --- QA regression tests (TASK-008) ------------------------------------------
+
+test("QA: a query consisting only of stopwords does not crash (BUG-1)", { skip }, () => {
+  const store = openFts5Store({ memory: true, stopwords: true });
+  store.add({ id: "x", title: "การติดตั้งโปรแกรม", body: "ของ และ แต่" });
+  for (const tone of ["strict", "both", "loose"]) {
+    const r = fts5Search(store, "การ และ ของ", { tone });
+    assert.deepEqual(r, [], `stopword-only query must return [] (tone=${tone})`);
+  }
+  // The weighted title path must be guarded the same way.
+  const w = fts5Search(store, "การ และ ของ", { tone: "both", titleWeight: 2 });
+  assert.deepEqual(w, [], "weighted path must also avoid the empty-MATCH crash");
+  store.close();
+});
+
+test("QA: offsets with stopwords are never wrong (correct or safely omitted)", { skip }, () => {
+  const store = openFts5Store({ memory: true, stopwords: true });
+  const body = "การติดตั้งโปรแกรมและติดตั้งใหม่";
+  store.add({ id: "d", body });
+  const [hit] = fts5Search(store, "ติดตั้ง", { tone: "strict", offsets: true });
+  assert.equal(hit.id, "d");
+  if (hit.quote !== undefined && hit.start !== undefined && hit.end !== undefined) {
+    assert.equal(body.slice(hit.start, hit.end), hit.quote, "offsets must map to RAW text");
+  }
+  // either we got correct offsets, or none — never a wrong guess
+  assert.ok(
+    hit.quote === undefined ||
+      (typeof hit.start === "number" && typeof hit.end === "number"),
+    "partial/wrong offsets must not be emitted"
+  );
+  store.close();
+});
+
+test("QA: prefix search with a stopword final token does not crash", { skip }, () => {
+  const store = openFts5Store({ memory: true, prefix: [2, 3], stopwords: true });
+  store.add({ id: "a", body: "การติดตั้งโปรแกรม" });
+  store.add({ id: "b", body: "ติดตังค่าบริการ" });
+  // Final token "โ" is not a stopword; run the prefix path and only require no throw.
+  const r = fts5Search(store, "การติดตั้งโ", { tone: "strict", prefix: true });
+  assert.ok(Array.isArray(r), "prefix+stopwords must not throw");
+  store.close();
+});
+
+test("QA: like_fallback tone-loose second scan surfaces the typo doc", { skip }, () => {
+  const store = storeWith(
+    { id: 1, body: "ดีมาก" },
+    { id: 2, body: "ดี้มาก" }
+  );
+  // 1-2 char query → LIKE scan. strict: only the literal "ดี้" doc.
+  assert.deepEqual(
+    fts5Search(store, "ดี้", { tone: "strict" }).map((r) => r.id),
+    [2],
+    "strict LIKE must match only the literal substring"
+  );
+  // both: the de-accented second needle (ดี) also surfaces doc 1 below.
+  const both = fts5Search(store, "ดี้", { tone: "both" }).map((r) => r.id);
+  assert.deepEqual([...both].sort(), [1, 2], "loose second scan must add the correct-tone doc");
+  store.close();
+});

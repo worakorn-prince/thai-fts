@@ -80,3 +80,12 @@ test("registry cleanup after the suite", () => {
   registerEngine("fts5", (opts) => createFts5Engine({ ...opts, memory: true }));
   assert.ok(listEngines().includes("fts5"), "re-register fts5 for other suites");
 });
+
+test("BUG-2: engine.search after close throws the same clear error as add", () => {
+  const eng = createFts5Engine({ memory: true });
+  eng.add({ id: "a", body: "โปรแกรมติดตั้ง" });
+  eng.close();
+  assert.throws(() => eng.search("โปรแกรม"), /Search engine is closed/);
+  assert.throws(() => eng.add({ id: "b", body: "x" }), /Search engine is closed/);
+  assert.doesNotThrow(() => eng.close(), "engine.close is idempotent");
+});

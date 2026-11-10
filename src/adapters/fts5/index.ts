@@ -81,6 +81,7 @@ export function createFts5Engine(opts: Fts5EngineOptions = {}): ThaiSearchEngine
       store.remove(id);
     },
     search(query, searchOpts) {
+      if (closed) throw new Error("Search engine is closed");
       return fts5Search(store, query, { ...base, ...searchOpts });
     },
     close() {

@@ -267,10 +267,12 @@ export function openFts5Store(opts: OpenFts5StoreOptions = {}): Fts5Store {
       db.close();
     },
     get(id: string | number): Fts5DocRow | undefined {
+      assertOpen();
       const row = selDoc.get(String(id)) as unknown as DocRowRecord | undefined;
       return row ? { id: decodeId(row), title: row.title, body: row.body } : undefined;
     },
     allRows(): Fts5DocRow[] {
+      assertOpen();
       return allRaws().map((r) => ({ id: decodeId(r), title: r.title, body: r.body }));
     },
   };

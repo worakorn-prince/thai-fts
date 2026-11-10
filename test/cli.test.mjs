@@ -7,6 +7,7 @@ import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import path from "node:path";
+import { tmpdir } from "node:os";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const cli = path.resolve(here, "..", "dist", "cli.js");
@@ -190,4 +191,11 @@ test("e2e --tone loose rescues the correct-tone doc even for a pure typo query",
   assert.equal(res.status, 0, res.stderr);
   const ids = res.stdout.trim().split("\n").filter(Boolean).map((l) => l.split("\t")[0]).sort();
   assert.deepEqual(ids, ["first", "second"], "loose channel should surface both docs");
+});
+
+test("QA: --db pointing into a missing directory exits 2 (no crash)", () => {
+  const badDb = path.join(tmpdir(), "thai-fts-missing-dir", "nope", "x.db");
+  const res = run(["index", "ติดตั้ง", "--id", "1", "--db", badDb]);
+  assert.equal(res.status, 2, `expected exit 2, got ${res.status} (stdout: ${res.stdout})`);
+  assert.match(res.stderr, /error:/, "must print a clean error on stderr");
 });

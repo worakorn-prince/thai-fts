@@ -307,21 +307,30 @@ export function fts5Search(
       : (table, match, channel) =>
           runWeightedChannel(table, match, channel, weighted as number);
 
+  // An all-stopword query collapses every chunk, so the built MATCH expression
+  // is empty and FTS5 would throw `syntax error near ""` if bound verbatim.
+  // Empty channel expression = no query token survives to match, and the index
+  // removed the same stopword tokens, so no document can match anyway — skip
+  // the channel (the search then returns no hits) instead of crashing.
+  const strictMatch = built.match.trim();
+  const looseMatch = built.looseMatch.trim();
   if (tone === "strict") {
-    channelRunner("fts5_strict", built.match, "strict");
+    if (strictMatch) channelRunner("fts5_strict", strictMatch, "strict");
   } else if (tone === "loose") {
-    channelRunner("fts5_loose", built.looseMatch, "loose");
+    if (looseMatch) channelRunner("fts5_loose", looseMatch, "loose");
   } else {
-    channelRunner("fts5_strict", built.match, "strict");
-    if (results.length < limit) channelRunner("fts5_loose", built.looseMatch, "loose");
+    if (strictMatch) channelRunner("fts5_strict", strictMatch, "strict");
+    if (results.length < limit && looseMatch) {
+      channelRunner("fts5_loose", looseMatch, "loose");
+    }
   }
 
   // Verified raw offsets (opt-in). A hit that cannot be aligned exactly keeps
   // its snippet but no quote/start/end — never a guessed offset.
-  if (opts.offsets === true) {
+  if (opts.offsets === true && results.length > 0) {
     for (const r of results) {
       const table = r.meta?.channel === "loose" ? "fts5_loose" : "fts5_strict";
-      const match = r.meta?.channel === "loose" ? built.looseMatch : built.match;
+      const match = r.meta?.channel === "loose" ? looseMatch : strictMatch;
       const raw = rawByKey.get(String(r.id));
       const off = offsetsFor(store, table, match, String(r.id), raw);
       if (off) {
