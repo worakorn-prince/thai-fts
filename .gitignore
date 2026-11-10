@@ -1,0 +1,21 @@
+# dependencies
+node_modules/
+
+# build output
+dist/
+
+# runtime / orchestration (local only — manager state, checkpoints, queue)
+.agent/
+*.log
+
+# editor / OS
+.DS_Store
+Thumbs.db
+*.tsbuildinfo
+
+# npm
+*.tgz
+
+# local-only dev config (bootstrap artifacts; reference local memory MCP paths)
+opencode.json
+.mcp.json
