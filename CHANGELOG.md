@@ -83,6 +83,13 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   Additive surface: `metaStatus` / `configFingerprint` / `configMismatch` store
   getters plus `computeFingerprint` / `canonicalJson` / `CURRENT_META_VERSION`.
   Legacy databases (no metadata) always open and report `legacy-unverified`.
+- **Retrieval-quality benchmark** (`npm run benchmark:quality`) — deterministic,
+  version-controlled Thai evaluation over a SYNTHETIC sealed corpus (180 docs /
+  30 judged queries) that scores P@5, R@20, MRR@10, graded nDCG@10, zero-result
+  rate, tone-rescue wins and added-irrelevant hits per tone variant
+  (strict / loose / both), with explicit denominators for fewer-than-k and
+  no-relevant queries. Writes per-query JSON plus a summary table; a standalone
+  script, never a CI gate, and the scores are not a real-world accuracy claim.
 
 ### Fixed
 

@@ -535,11 +535,20 @@ npm run benchmark        # full suite — segmentation, indexing, search latency
 npm run benchmark:quick  # fast subset — same shapes, smaller corpus / fewer iterations (~3 s)
 node benchmark/addmany-vs-add.mjs --quick   # per-doc add() vs bulk addMany() — smoke (500 docs)
 node benchmark/addmany-vs-add.mjs           # same harness at 20,000 docs (~9 min)
+npm run benchmark:quality                   # retrieval quality (P@5 / R@20 / MRR@10 / nDCG@10)
 ```
 
-Measured results are written to `benchmark/results/`. Numbers move with the
+Measured results are written to `benchmark/results/` (performance) and
+`benchmark/quality/results/` (quality). Numbers move with the
 machine (CPU, storage, OS), so read them as **relative** signals — compare run
 against run on the same machine — rather than as a guaranteed floor.
+
+Retrieval quality is scored against **SYNTHETIC** hand-authored Thai fixtures
+(`benchmark/quality/`) — sealed corpus + 30 queries with per-query relevance
+judgments, scored per tone variant (strict / loose / both) with explicit
+denominators for fewer-than-k results and no-relevant queries. The scores
+demonstrate is/regression behavior on these fixtures; they are **not** a
+real-world accuracy claim. It runs as its own script, never as a CI gate.
 
 Single-machine sample (Node 26, one dev laptop, seeded corpus — a sample, not a
 fleet average). Full mode segments a 2.41 MiB corpus and indexes 3,000 documents

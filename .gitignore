@@ -6,6 +6,7 @@ dist/
 
 # benchmark output (local only)
 benchmark/results/
+benchmark/quality/results/
 
 # runtime / orchestration (local only — manager state, checkpoints, queue)
 .agent/
