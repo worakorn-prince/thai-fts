@@ -63,6 +63,15 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `ThaiSearchMeta` (`method`, `channel`, `truncated?: true`) intersected with
   `Record<string, unknown>`, so the common diagnostics are typed while
   adapter-specific keys remain allowed.
+- **Runtime capability check** (`thai-fts/fts5`) — `checkSqliteSupport()` returns
+  `{ ok, runtime, sqliteVersion?, segmenter, missing, guidance? }` by probing the
+  built-in `node:sqlite` module, its `DatabaseSync` export and a real FTS5
+  create + Thai `MATCH` round-trip on a throwaway `:memory:` database (always
+  closed). `openFts5Store()` / `createFts5Engine()` now resolve `node:sqlite`
+  lazily at open time instead of at import, so `thai-fts` and `thai-fts/core`
+  still load on a runtime without it; opening a store there throws the new
+  `SqliteSupportError` (`.runtime`, `.missing`) naming the fix in the package's
+  `engines` range (`>= 22.13.0`). No version constraints changed.
 
 ### Fixed
 

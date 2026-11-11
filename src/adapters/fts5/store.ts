@@ -22,7 +22,7 @@
  * store.close();
  * ```
  */
-import { DatabaseSync } from "node:sqlite";
+import type { DatabaseSync } from "node:sqlite";
 import { looseForm } from "../../core/segment.js";
 import { THAI_DEFAULT_STOPWORDS } from "../../core/stopwords.js";
 import { registerThaiDictionary } from "../../core/dictionaries.js";
@@ -30,6 +30,7 @@ import type { ThaiDictionaryDef } from "../../core/types.js";
 import type { ThaiSearchDoc } from "../engine.js";
 import { buildIndexPayload } from "../_align.js";
 import { buildLooseSchema, buildStrictSchema } from "./schema.js";
+import { requireSqlite } from "./capability.js";
 
 /** Options for opening a memory- or file-backed FTS5 store. */
 export interface OpenFts5StoreOptions {
@@ -134,13 +135,20 @@ function decodeId(r: Pick<DocRowRecord, "id" | "is_num">): string | number {
 }
 
 /**
+ * `node:sqlite` is resolved at open time rather than at import, so a runtime
+ * without the built-in module can still load `thai-fts` and its core modules.
+ */
+type SqliteDatabaseConstructor = { new (location: string): DatabaseSync };
+
+/**
  * Open (or create) an FTS5 document store. File databases use WAL + NORMAL
  * synchronous for crash safety with low write latency; memory databases get
  * the same busy/foreign-key tuning without WAL (a no-op in-memory).
  */
 export function openFts5Store(opts: OpenFts5StoreOptions = {}): Fts5Store {
   const isMemory = opts.memory === true || !opts.path || opts.path === ":memory:";
-  const db = new DatabaseSync(isMemory ? ":memory:" : (opts.path as string));
+  const SqliteDatabase = requireSqlite() as unknown as SqliteDatabaseConstructor;
+  const db = new SqliteDatabase(isMemory ? ":memory:" : (opts.path as string));
 
   for (const pragma of DEFAULT_PRAGMAS) db.exec(pragma);
   if (!isMemory) db.exec("PRAGMA journal_mode = WAL");

@@ -28,6 +28,12 @@ export { openFts5Store } from "./store.js";
 export type { OpenFts5StoreOptions, Fts5Store, Fts5DocRow } from "./store.js";
 export { fts5Search, fts5SearchWithMeta } from "./search.js";
 export type { Fts5SearchOptions, Fts5Candidate } from "./search.js";
+export { checkSqliteSupport, SqliteSupportError } from "./capability.js";
+export type {
+  CheckSqliteSupportOptions,
+  SegmenterSupport,
+  SqliteSupportReport,
+} from "./capability.js";
 
 /**
  * Merge per-search options over the engine-level defaults using

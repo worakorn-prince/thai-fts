@@ -252,6 +252,32 @@ plus any adapter-specific keys.
 - `openFts5Store({ path?, memory?, prefix?, stopwords?, dictionaries? })` → `{ db, add, remove, update, rebuild, close, get, allRows }`
 - `fts5Search(store, query, opts?)` → `ThaiSearchResult[]` (dual-channel, `filter` hook, `prefix`/`offsets`/`titleWeight`)
 - `FTS5_STRICT_SCHEMA`, `FTS5_LOOSE_SCHEMA` — mark-aware DDL (`unicode61 categories 'L* N* Co M*'`)
+- `checkSqliteSupport()` → `{ ok, runtime, sqliteVersion?, segmenter, missing, guidance? }` — opt-in
+  runtime capability probe (see [Checking runtime support](#checking-runtime-support))
+
+#### Checking runtime support
+
+The FTS5 adapter resolves `node:sqlite` where a store is opened, never at import
+time, so `thai-fts/core` and `thai-fts/engine` keep working on a runtime without
+the built-in module. Ask ahead of time with the capability probe — it opens a
+throwaway `:memory:` database, creates an FTS5 table, runs a Thai `MATCH`, and
+closes it again:
+
+```js
+import { checkSqliteSupport } from "thai-fts";
+
+const support = checkSqliteSupport();
+if (!support.ok) {
+  // support.missing === ["node:sqlite"] | ["node:sqlite DatabaseSync"] | ["FTS5"]
+  console.error(support.runtime, support.missing, support.guidance);
+}
+console.log(support.sqliteVersion); // e.g. "3.54.0"
+```
+
+`openFts5Store()` / `createFts5Engine()` on such a runtime raise
+`SqliteSupportError` (`.runtime`, `.missing`) whose message names the detected
+runtime, the missing capability and the fix — a Node.js release inside the
+package's `engines` range (`>= 22.13.0`).
 
 #### Opt-in search features (all default off)
 
@@ -476,7 +502,8 @@ layer, keeping the same interface.
 ## Zero runtime dependencies
 
 - Segmentation: `Intl.Segmenter` (built into Node full-icu), dict+syllable fallback
-- FTS: `node:sqlite` `DatabaseSync` + FTS5 virtual tables (built into Node ≥ 22.5)
+- FTS: `node:sqlite` `DatabaseSync` + FTS5 virtual tables (built into Node ≥ 22.5),
+  resolved lazily when a store opens — `checkSqliteSupport()` reports availability
 - Tests: `node:test`; build: `tsup` (dev-only)
 
 ## Development
