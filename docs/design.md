@@ -80,6 +80,18 @@ stays in lockstep forever. Its rows store `looseForm` of the strict payload;
 (and lowercases), keeping all vowels intact. Both `expandIndexedText` and
 `looseForm` are byte-idempotent, so re-indexing an id is a fixed point.
 
+### Rollback error preservation
+
+Every write path in `src/adapters/fts5/store.ts` (`add`, `addMany`, `remove`,
+`rebuild`) opens an explicit `BEGIN`/`COMMIT` and, on failure, calls
+`rollbackQuietly()`. A `ROLLBACK` that itself throws is swallowed there, so the
+error that reaches the caller is always the original insert/batch failure —
+cleanup can never mask the cause. The all-or-nothing contract covers
+`addMany()` too: one transaction per batch, `BEGIN` deferred to the first
+document, so an empty or immediately-throwing iterable touches nothing and a
+mid-batch failure leaves no partial rows (including no half-finished
+replacement of an existing id).
+
 ## 4. Query-time pipeline
 
 `buildFtsMatch(query)` / `buildLooseFtsMatch(query)` mirror the index transform:
@@ -104,6 +116,22 @@ phrases, so `fts5Search` switches to a SQL `LIKE` scan (escaped) reported as
 reads the raw documents (not the de-accented loose channel), so a tone typo in
 a 1–2-char query can't be rescued there — tone-typo rescue via the loose
 channel applies to longer (3+ char) queries.
+
+### Single truncation rule
+
+`planQueryChunks()` in `src/core/query.ts` is the only place the 8-chunk cap
+(`MAX_QUERY_CHUNKS`) lives. It returns `{ chunks, truncated }`, and every
+consumer reads that plan instead of re-splitting: the strict/loose MATCH
+builders, `buildSearchQuery`, and `buildChannelPhrases()` / the offset helper
+in `src/adapters/_align.ts` (which the fts5, memory and both HTTP adapters go
+through). Two copies of the split used to exist and could drift; now a query
+is capped once, identically everywhere.
+
+`searchWithMeta()` returns `ThaiSearchOutcome` — `{ hits, truncated }` — so a
+capped query stays observable even when it produced **zero** hits
+(`{ hits: [], truncated: true }`). The per-hit `meta.truncated` remains a
+per-hit flag and is present only when `true`, so it can never be read as a
+statement about the whole result set.
 
 ## 5. Strict-primary + loose fallback (dual-channel merge)
 
@@ -170,6 +198,45 @@ adapter pre-registers itself. **Future adapters** plug in here without touching
 callers: Meilisearch / Elasticsearch (REST mapping of the same four methods),
 an in-memory JS index, and a vector/hybrid layer that chains embeddings onto
 the same interface.
+
+### Sync vs async engine registry
+
+`registerEngine`/`createEngine` own synchronous factories;
+`registerAsyncEngine`/`createAsyncEngine` own factories that return a
+`ThaiAsyncEngine` — `add`/`remove`/`search` return Promises, `close()` stays
+sync, and the instance is branded `async: true`. The two APIs are separate
+because the *return types* differ: an async factory handed to `createEngine`
+would return a Promise where the signature promises an engine, which is
+exactly the mismatch the old `as unknown as ThaiEngineFactory` cast hid — the
+cast silenced the compiler while every caller still received a Promise-typed
+engine it could not await.
+
+The kind is part of the registration, not of the name lookup. `listEngines()`
+and `listAsyncEngines()` partition the same registry, and invoking the wrong
+creator throws a message naming the right one
+(`createEngine("meilisearch")` → use `createAsyncEngine`, and the mirror
+error), so no caller ever gets a half-usable engine. `isAsyncEngine(engine)`
+classifies an instance without probing `add` (which would mutate the index):
+the explicit `async` brand first, then a registry-known `type`, then an
+`AsyncFunction`-tagged `add` for third-party adapters.
+
+### HTTP bulk semantics
+
+Both remote adapters implement `addMany(docs)` accepting `Iterable |
+AsyncIterable`; an empty batch sends no request at all. The two backends
+differ in the guarantee they can offer, and the adapters do not pretend
+otherwise:
+
+- **Meilisearch** — ONE `POST /indexes/{index}/documents` whose body is the
+  JSON array of both channel docs per logical document (strict id `<id>`,
+  loose id `<id>::loose`). A documents request is applied atomically per task,
+  so the batch lands whole or not at all.
+- **Elasticsearch** — ONE `POST /_bulk` NDJSON stream (action line
+  `{"index":{"_index":..,"_id":..}}` + document line per channel doc, trailing
+  newline). `_bulk` is **not** atomic: items that succeeded stay indexed when
+  others fail, and the thrown error names every failed id. Replay is
+  idempotent because ids are explicit — `<id>` and `<id>::loose` are
+  overwritten, never duplicated.
 
 ## 8. Zero runtime dependencies
 

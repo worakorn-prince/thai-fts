@@ -144,3 +144,48 @@ test("addMany on a closed store throws the guarded error, like add()", () => {
   store.close();
   assert.throws(() => store.addMany([{ id: "a", body: "alpha" }]), /FTS5 store is closed/);
 });
+
+/* ------------------------------------------------------------------ *
+ * TASK-013: a failing ROLLBACK must never mask the original error
+ * ------------------------------------------------------------------ */
+
+test("addMany: a throwing ROLLBACK still surfaces the ORIGINAL insert error", () => {
+  const store = openFts5Store({ memory: true });
+  const realExec = store.db.exec.bind(store.db);
+  let rollbacks = 0;
+  store.db.exec = (sql) => {
+    if (String(sql).trim().toUpperCase() === "ROLLBACK") {
+      rollbacks += 1;
+      throw new Error("rollback exploded");
+    }
+    return realExec(sql);
+  };
+  function* batch() {
+    yield { id: "ok", title: "", body: "alpha" };
+    yield { title: "", body: "this doc has no id" };
+  }
+  let thrown;
+  try {
+    store.addMany(batch());
+  } catch (e) {
+    thrown = e;
+  } finally {
+    // Restore the real exec, then unwind the transaction the failed ROLLBACK
+    // left open before closing the database.
+    store.db.exec = realExec;
+    try {
+      realExec("ROLLBACK");
+    } catch {
+      /* already unwound */
+    }
+    store.close();
+  }
+  assert.ok(thrown, "the batch must fail");
+  assert.equal(rollbacks, 1, "the batch failure must still attempt a ROLLBACK");
+  assert.match(String(thrown.message), /requires a document with an id/);
+  assert.doesNotMatch(
+    String(thrown.message),
+    /rollback exploded/,
+    "the cleanup failure must never replace the original error"
+  );
+});

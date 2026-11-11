@@ -6,12 +6,14 @@
  * type is re-exported by name from the meilisearch adapter file only).
  *
  * Contents:
- *  - `HttpSearchEngine` — the ASYNC engine contract the HTTP adapters
- *    implement (`add`/`remove`/`search` return Promises because they talk to
- *    a remote server; the local fts5/memory engines stay synchronous);
+ *  - `HttpSearchEngine` — the historical name of the ASYNC engine contract the
+ *    HTTP adapters implement. It is now a straight alias of `ThaiAsyncEngine`
+ *    (declared in `engine.ts`), which carries the `readonly async: true` brand
+ *    the registry uses to classify engines without probing the index;
  *  - `requestJSON` — one small fetch-based JSON helper: builds the absolute
- *    URL, sets `Content-Type: application/json`, optional static headers,
- *    throws `Error` with status + body excerpt on non-2xx. No other features;
+ *    URL, sets `Content-Type: application/json` (or an explicit
+ *    `contentType` for a raw/NDJSON body), optional static headers, throws
+ *    `Error` with status + body excerpt on non-2xx. No other features;
  *  - `authHeaders` — the single static-API-key seam: Meilisearch uses
  *    `Authorization: Bearer <apiKey>`, Elasticsearch
  *    `Authorization: Basic base64(":" + apiKey)` (ES API-key scheme);
@@ -27,29 +29,16 @@
  * so the package keeps zero runtime dependencies.
  */
 import { THAI_DEFAULT_STOPWORDS } from "../core/stopwords.js";
-import type {
-  ThaiEngineOptions,
-  ThaiSearchDoc,
-  ThaiSearchResult,
-} from "./engine.js";
+import type { ThaiEngineOptions } from "./engine.js";
 
-/** The ASYNC search-engine contract for adapters backed by a remote server.
+export type { ThaiAsyncEngine } from "./engine.js";
+
+/** The ASYNC search-engine contract for adapters backed by a remote server:
  * `add`/`remove`/`search` are awaited; `close` stays synchronous (no local
- * resources are held, but every later use throws). */
-export interface HttpSearchEngine {
-  /** Stable adapter kind, e.g. `"meilisearch"`. */
-  readonly type: string;
-  /** Index (or re-index) a document on the remote server. */
-  add(doc: ThaiSearchDoc): Promise<void>;
-  /** Drop the remote document(s) for `id` (no-op when absent — a 404 is
-   * swallowed). */
-  remove(id: string | number): Promise<void>;
-  /** Ranked hits for `query`, honoring the `tone`/`limit` subset of `opts`. */
-  search(query: string, opts?: ThaiEngineOptions): Promise<ThaiSearchResult[]>;
-  /** Mark the engine closed; every later use throws
-   * `"Search engine is closed"`. */
-  close(): void;
-}
+ * resources are held, but every later use throws). Kept as an alias so
+ * existing `HttpSearchEngine` imports keep compiling — it IS
+ * `ThaiAsyncEngine`, the brand included. */
+export type HttpSearchEngine = import("./engine.js").ThaiAsyncEngine;
 
 /** Common create-time options for the reference HTTP adapters.
  * `endpoint` is the server root (e.g. `http://localhost:7700`), `index` the
@@ -81,15 +70,22 @@ export type JsonValue = unknown;
 export interface RequestJsonOptions {
   /** Extra static headers merged over `Content-Type`. */
   headers?: Record<string, string>;
-  /** JSON-serializable request body (omitted when absent, e.g. DELETE). */
+  /** JSON-serializable request body (ignored when `rawBody` is set; omitted
+   * when both are absent, e.g. DELETE). */
   body?: unknown;
+  /** Pre-serialized body sent verbatim, for APIs that do not take JSON — the
+   * Elasticsearch `_bulk` NDJSON stream is the one caller today. */
+  rawBody?: string;
+  /** `Content-Type` for `rawBody` (defaults to `application/json`). */
+  contentType?: string;
 }
 
 /**
  * One JSON request against a remote server via global `fetch` (Node 18+).
- * Builds the absolute URL from `endpoint` + `path`, sets
- * `Content-Type: application/json`, sends an optional JSON body, and resolves
- * with the parsed JSON (null/undefined for empty bodies). A non-2xx response
+ * Builds the absolute URL from `endpoint` + `path`, sets `Content-Type` from
+ * `opts.contentType` (`application/json` by default), sends either the
+ * pre-serialized `rawBody` or `JSON.stringify(opts.body)`, and resolves with
+ * the parsed JSON (null/undefined for empty bodies). A non-2xx response
  * rejects with `Error` whose message carries the status + a body excerpt.
  * Nothing else: no retries, no auth flows, no streaming.
  */
@@ -103,13 +99,19 @@ export async function requestJSON(
   if (!root) throw new TypeError("requestJSON requires a non-empty endpoint");
   const url = `${root}/${String(path ?? "").replace(/^\/+/, "")}`;
   const headers: Record<string, string> = {
-    "Content-Type": "application/json",
+    "Content-Type": opts.contentType ?? "application/json",
     ...(opts.headers ?? {}),
   };
+  const payload =
+    opts.rawBody !== undefined
+      ? opts.rawBody
+      : opts.body === undefined
+        ? undefined
+        : JSON.stringify(opts.body);
   const res = await fetch(url, {
     method: String(method ?? "GET").toUpperCase(),
     headers,
-    body: opts.body === undefined ? undefined : JSON.stringify(opts.body),
+    body: payload,
   });
   const text = await res.text();
   if (!res.ok) {

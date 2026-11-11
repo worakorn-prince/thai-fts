@@ -309,3 +309,86 @@ test("addMany on a closed memory engine throws the guarded error", () => {
   eng.close();
   assert.throws(() => eng.addMany([{ id: "a", body: "alpha" }]), /Search engine is closed/);
 });
+
+/* ------------------------------------------------------------------ *
+ * TASK-013: searchWithMeta + replace-then-fail rollback + defaults
+ * ------------------------------------------------------------------ */
+
+test("searchWithMeta: a truncated 9-chunk query with no matches reports truncated", () => {
+  const eng = createMemoryEngine({});
+  try {
+    eng.add({ id: "a", body: "alpha" });
+    const words = Array.from({ length: 9 }, (_, i) => `absentword${i}`);
+    const out = eng.searchWithMeta(words.join(" "), { tone: "strict" });
+    assert.deepEqual(out.hits, [], "nothing matches");
+    assert.equal(out.truncated, true, "0 hits from a capped query is NOT a complete result");
+
+    const eight = Array.from({ length: 8 }, (_, i) => `absentword${i}`);
+    const whole = eng.searchWithMeta(eight.join(" "), { tone: "strict" });
+    assert.deepEqual(whole.hits, []);
+    assert.equal(whole.truncated, false, "the whole query was analyzed");
+  } finally {
+    eng.close();
+  }
+});
+
+test("addMany: a replace-then-fail batch restores the ORIGINAL payload AND its position", () => {
+  const eng = createMemoryEngine({});
+  try {
+    for (const id of ["a", "b", "c"]) eng.add({ id, body: "alpha" });
+    const order = () => eng.search("alpha", { tone: "strict", limit: 10 }).map((r) => r.id);
+    assert.deepEqual(order(), ["a", "b", "c"], "equal scores fall back to insertion order");
+
+    // The getter throws only when insert() reads `body`, i.e. AFTER "a" has
+    // already been replaced, so the rollback must undo a real half-applied
+    // mutation — content AND map position (a move to the end would change the
+    // ranking tie-break).
+    const bad = {
+      id: "x",
+      get body() {
+        throw new Error("body exploded");
+      },
+    };
+    assert.throws(
+      () => eng.addMany([{ id: "a", body: "replacement payload" }, bad]),
+      /body exploded/
+    );
+
+    assert.deepEqual(order(), ["a", "b", "c"], "the replacement must restore its original slot");
+    assert.equal(
+      eng.search("replacement", { tone: "strict" }).length,
+      0,
+      "the replacement payload must stay invisible"
+    );
+    eng.add({ id: "d", body: "alpha" });
+    assert.deepEqual(order(), ["a", "b", "c", "d"], "the restored map keeps appending normally");
+  } finally {
+    eng.close();
+  }
+});
+
+test("createMemoryEngine: a default allTerms survives an explicit undefined override", () => {
+  const eng = createMemoryEngine({ allTerms: true });
+  try {
+    eng.add({ id: 1, body: "alpha" });
+    eng.add({ id: 2, body: "beta" });
+    eng.add({ id: 3, body: "alpha beta" });
+    assert.deepEqual(
+      eng.search("alpha beta", { tone: "strict" }).map((r) => r.id),
+      [3],
+      "the engine default must AND the chunks"
+    );
+    assert.deepEqual(
+      eng.search("alpha beta", { tone: "strict", allTerms: undefined }).map((r) => r.id),
+      [3],
+      "{ allTerms: undefined } must NOT clobber the engine default"
+    );
+    assert.deepEqual(
+      eng.search("alpha beta", { tone: "strict", allTerms: false }).map((r) => r.id).sort(),
+      [1, 2, 3],
+      "an explicit false still overrides the default"
+    );
+  } finally {
+    eng.close();
+  }
+});

@@ -67,6 +67,31 @@ import type { BuiltQuery, QueryChunk, ToneMode } from "./types.js";
  * through `BuiltQuery.truncated` rather than failing silently. */
 export const MAX_QUERY_CHUNKS = 8;
 
+/** The ONE chunk plan every analyzer uses: the normalized chunks that will be
+ * analyzed (at most `MAX_QUERY_CHUNKS`) plus whether the query carried more
+ * chunks than the cap. Keeping the split here makes the 8-chunk rule a single
+ * source of truth for the MATCH builders, `buildSearchQuery` and the adapter
+ * helpers in `src/adapters/_align.ts`. */
+export interface QueryChunkPlan {
+  /** The analyzed chunks, in order (never more than `MAX_QUERY_CHUNKS`). */
+  chunks: string[];
+  /** True when the raw query had more chunks than `MAX_QUERY_CHUNKS`. */
+  truncated: boolean;
+}
+
+/** Normalize a raw query and split it into the analyzed chunk plan (see
+ * `QueryChunkPlan`). Pure; the single place the 8-chunk cap is applied. */
+export function planQueryChunks(query: string): QueryChunkPlan {
+  const rawChunks = normalizeThaiInput(String(query ?? ""))
+    .trim()
+    .split(/\s+/)
+    .filter(Boolean);
+  return {
+    chunks: rawChunks.slice(0, MAX_QUERY_CHUNKS),
+    truncated: rawChunks.length > MAX_QUERY_CHUNKS,
+  };
+}
+
 /** Shared options for the MATCH builders. */
 export interface MatchBuildOptions {
   /** Append a FTS5 prefix postfix `*` to each phrase's final token. */
@@ -132,17 +157,14 @@ export function quoteFtsToken(t: string): string {
  * phrase, so an enclosing `AND` cannot bind into it (FTS5 precedence is
  * `NOT > AND > OR`); a single-phrase chunk stays bare. */
 function joinGroup(parts: readonly string[], allTerms: boolean): string {
-  if (parts.length === 1) return parts[0] as string;
+  const first = parts[0]!;
+  if (parts.length === 1) return first;
   const or = parts.join(" OR ");
   return allTerms ? `(${or})` : or;
 }
 
 export function buildFtsMatch(query: string, opts?: MatchBuildOptions): string {
-  const chunks = normalizeThaiInput(query)
-    .trim()
-    .split(/\s+/)
-    .filter(Boolean)
-    .slice(0, MAX_QUERY_CHUNKS);
+  const chunks = planQueryChunks(query).chunks;
   const filter = filterFor(opts, false);
   const prefix = opts?.prefix === true;
   const stem = opts?.stem === true;
@@ -192,11 +214,7 @@ export function buildFtsMatch(query: string, opts?: MatchBuildOptions): string {
  * case-folds) and the loose channel adds nothing.
  */
 export function buildLooseFtsMatch(query: string, opts?: MatchBuildOptions): string {
-  const chunks = normalizeThaiInput(query)
-    .trim()
-    .split(/\s+/)
-    .filter(Boolean)
-    .slice(0, MAX_QUERY_CHUNKS);
+  const chunks = planQueryChunks(query).chunks;
   // Stopword filtering on the loose side compares in de-accented form, so a
   // tone-mark typo in a stopword still drops the same token the index removed.
   const filter = filterFor(opts, true);
@@ -265,9 +283,9 @@ export function buildSearchQuery(
   const stopwords = objectOpts?.stopwords;
   const stem = objectOpts?.stem;
   const allTerms = objectOpts?.allTerms;
-  const rawChunks = normalizeThaiInput(query).trim().split(/\s+/).filter(Boolean);
-  const truncated = rawChunks.length > MAX_QUERY_CHUNKS;
-  const chunkTexts = rawChunks.slice(0, MAX_QUERY_CHUNKS);
+  const plan = planQueryChunks(query);
+  const truncated = plan.truncated;
+  const chunkTexts = plan.chunks;
   const chunks: QueryChunk[] = chunkTexts.map((raw) => {
     const thai = hasThai(raw);
     const words = thai ? segmentQueryChunk(raw) : [raw];

@@ -24,7 +24,15 @@
  * the fts5/memory phrase contract. Hits are merged strict-then-loose in JS,
  * deduped by BASE id (the `::loose` suffix stripped), ranked by
  * `_rankingScore` when the server provides it (server order otherwise), and
- * capped at `clampLimit(limit)`.
+ * capped at `clampLimit(limit)`. `searchWithMeta()` returns the same hits plus
+ * the query-level `truncated` flag, which is observable even for a capped query
+ * that matched nothing.
+ *
+ * **Bulk indexing.** `addMany(docs)` accepts a sync OR async iterable and sends
+ * ONE `POST /indexes/{index}/documents` carrying the JSON array of BOTH channel
+ * docs for every logical document (same builders as `add`). An empty batch
+ * sends nothing; Meilisearch applies a documents request atomically, so the
+ * batch lands whole or not at all.
  *
  * **Not supported here (documented, not faked):** verified raw offsets
  * (`offsets` → no `quote`/`start`/`end` — the server only sees the indexed
@@ -61,10 +69,10 @@ import {
   type HttpSearchEngine,
 } from "../_http.js";
 import {
-  registerEngine,
-  type ThaiEngineFactory,
+  registerAsyncEngine,
   type ThaiEngineOptions,
   type ThaiSearchDoc,
+  type ThaiSearchOutcome,
   type ThaiSearchResult,
 } from "../engine.js";
 
@@ -120,11 +128,16 @@ export function createMeilisearchEngine(
     if (closed) throw new Error("Search engine is closed");
   };
 
-  const add = async (doc: ThaiSearchDoc): Promise<void> => {
-    assertOpen();
+  /** Both channel docs for ONE logical document: strict (id = base id) plus
+   * its loose twin (id = `<base>::loose`), so a backend that de-accents never
+   * conflates the channels. Identical builders to the single-doc `add()`. */
+  const channelDocs = (
+    doc: ThaiSearchDoc,
+    method: "add" | "addMany"
+  ): Array<Record<string, unknown>> => {
     if (doc == null || doc.id === null || doc.id === undefined) {
       throw new TypeError(
-        "meilisearch engine add() requires a document with an id"
+        `meilisearch engine ${method}() requires a document with an id`
       );
     }
     const title = String(doc.title ?? "");
@@ -133,19 +146,43 @@ export function createMeilisearchEngine(
     const strictBody = buildIndexPayload(body, stopwords, stem);
     const baseId = String(doc.id);
     ids.track(doc.id);
-    // Two docs per logical doc: strict + loose (looseForm of the same strict
-    // payload), so both channels match server-side without conflating.
+    return [
+      { id: baseId, th_title: strictTitle, th_body: strictBody, th_channel: "strict" },
+      {
+        id: `${baseId}::loose`,
+        th_title: looseForm(strictTitle),
+        th_body: looseForm(strictBody),
+        th_channel: "loose",
+      },
+    ];
+  };
+
+  const add = async (doc: ThaiSearchDoc): Promise<void> => {
+    assertOpen();
     await requestJSON(endpoint, `/indexes/${index}/documents`, "POST", {
       headers,
-      body: [
-        { id: baseId, th_title: strictTitle, th_body: strictBody, th_channel: "strict" },
-        {
-          id: `${baseId}::loose`,
-          th_title: looseForm(strictTitle),
-          th_body: looseForm(strictBody),
-          th_channel: "loose",
-        },
-      ],
+      body: channelDocs(doc, "add"),
+    });
+  };
+
+  /**
+   * Bulk-index every document in ONE request (Meilisearch applies a documents
+   * POST atomically): the body is the flat array of both channel docs per
+   * logical document. Accepts sync and async iterables; an empty batch sends
+   * no HTTP request at all.
+   */
+  const addMany = async (
+    docs: Iterable<ThaiSearchDoc> | AsyncIterable<ThaiSearchDoc>
+  ): Promise<void> => {
+    assertOpen();
+    const batch: Array<Record<string, unknown>> = [];
+    for await (const doc of docs) {
+      batch.push(...channelDocs(doc, "addMany"));
+    }
+    if (batch.length === 0) return;
+    await requestJSON(endpoint, `/indexes/${index}/documents`, "POST", {
+      headers,
+      body: batch,
     });
   };
 
@@ -168,14 +205,17 @@ export function createMeilisearchEngine(
     }
   };
 
-  const search = async (
+  /** Shared search pipeline: hits plus the query-level truncation flag (see
+   * `ThaiSearchOutcome`). `truncated` comes from the shared chunk plan, so a
+   * capped query reports it even when nothing matched. */
+  const searchOutcome = async (
     query: string,
     sOpts?: ThaiEngineOptions
-  ): Promise<ThaiSearchResult[]> => {
+  ): Promise<ThaiSearchOutcome> => {
     assertOpen();
     const s = sOpts ?? {};
     const trimmed = String(query ?? "").trim();
-    if (!trimmed) return [];
+    if (!trimmed) return { hits: [], truncated: false };
     const limit = clampLimit(s.limit ?? base.limit);
     const tone = resolveToneMode(s.tone ?? base.tone);
     // Symmetric query pipeline (same index-time stopwords/stem as add()).
@@ -253,14 +293,22 @@ export function createMeilisearchEngine(
       await push(strict, "strict", out, seen);
       await push(loose, "loose", out, seen);
     }
-    return out;
+    return { hits: out, truncated };
   };
+
+  const search = async (
+    query: string,
+    sOpts?: ThaiEngineOptions
+  ): Promise<ThaiSearchResult[]> => (await searchOutcome(query, sOpts)).hits;
 
   return {
     type: "meilisearch",
+    async: true,
     add,
+    addMany,
     remove,
     search,
+    searchWithMeta: searchOutcome,
     close() {
       // No local resources to release; closing only seals the engine.
       closed = true;
@@ -268,6 +316,6 @@ export function createMeilisearchEngine(
   };
 }
 
-// Pre-register the reference adapter under its name so
-// `createEngine("meilisearch")` works out of the box.
-registerEngine("meilisearch", createMeilisearchEngine as unknown as ThaiEngineFactory);
+// Pre-register the reference adapter as an ASYNC engine so
+// `createAsyncEngine("meilisearch")` works out of the box.
+registerAsyncEngine("meilisearch", createMeilisearchEngine);

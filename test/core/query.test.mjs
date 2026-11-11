@@ -8,6 +8,7 @@ const {
   buildFtsMatch,
   buildLooseFtsMatch,
   buildSearchQuery,
+  planQueryChunks,
   quoteFtsToken,
   hasThai,
 } = await import("../../dist/index.js");
@@ -179,4 +180,28 @@ test("buildSearchQuery.truncated flags the 8-chunk cap (MAX_QUERY_CHUNKS)", () =
   assert.equal(pastCap.truncated, true, "one chunk past the cap must be flagged");
   assert.equal(pastCap.chunks.length, 8, "the dropped chunk is gone from the expressions");
   assert.ok(!pastCap.match.includes("w8"), `w8 must not appear: ${pastCap.match}`);
+});
+
+/* ------------------------------------------------------------------ *
+ * TASK-013: planQueryChunks — the single source of the 8-chunk rule
+ * ------------------------------------------------------------------ */
+
+test("planQueryChunks: keeps the first 8 chunks and flags the dropped tail", () => {
+  const words = (n) => Array.from({ length: n }, (_, i) => `w${i}`).join(" ");
+  const atCap = planQueryChunks(words(8));
+  assert.deepEqual(atCap.chunks, ["w0", "w1", "w2", "w3", "w4", "w5", "w6", "w7"]);
+  assert.equal(atCap.truncated, false, "exactly at the cap is a complete plan");
+
+  const pastCap = planQueryChunks(words(9));
+  assert.equal(pastCap.chunks.length, 8, "never more than the cap");
+  assert.equal(pastCap.chunks.includes("w8"), false, "the 9th chunk is dropped");
+  assert.equal(pastCap.truncated, true, "the dropped chunk must be reported");
+});
+
+test("planQueryChunks: empty and whitespace-only queries are empty, not truncated", () => {
+  for (const q of ["", "   ", "\t\n "]) {
+    const plan = planQueryChunks(q);
+    assert.deepEqual(plan.chunks, []);
+    assert.equal(plan.truncated, false);
+  }
 });

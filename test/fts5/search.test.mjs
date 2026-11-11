@@ -5,7 +5,9 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 
-const { openFts5Store, fts5Search, createFts5Engine } = await import("../../dist/index.js");
+const { openFts5Store, fts5Search, fts5SearchWithMeta, createFts5Engine } = await import(
+  "../../dist/index.js"
+);
 
 // ICU segmentation is optional (small-icu runtimes); Thai assertions skip then.
 const skip = typeof Intl.Segmenter !== "function";
@@ -511,4 +513,66 @@ test("meta.truncated: only a query cut past the chunk cap reports it", { skip },
   assert.ok(short.length > 0);
   assert.equal("truncated" in short[0].meta, false, "an uncapped hit keeps its original shape");
   store.close();
+});
+
+/* ------------------------------------------------------------------ *
+ * TASK-013: searchWithMeta — truncation stays visible with 0 hits
+ * ------------------------------------------------------------------ */
+
+test("searchWithMeta: a truncated 9-chunk query with no matches reports truncated", () => {
+  const store = storeWith({ id: 1, title: "", body: "alpha" });
+  const words = Array.from({ length: 9 }, (_, i) => `absentword${i}`);
+  const out = fts5SearchWithMeta(store, words.join(" "), { tone: "strict" });
+  assert.deepEqual(out.hits, [], "nothing matches");
+  assert.equal(out.truncated, true, "0 hits from a capped query is NOT a complete result");
+  store.close();
+});
+
+test("searchWithMeta: an 8-chunk non-matching query is not truncated", () => {
+  const store = storeWith({ id: 1, title: "", body: "alpha" });
+  const words = Array.from({ length: 8 }, (_, i) => `absentword${i}`);
+  const out = fts5SearchWithMeta(store, words.join(" "), { tone: "strict" });
+  assert.deepEqual(out.hits, []);
+  assert.equal(out.truncated, false, "the whole query was analyzed");
+  store.close();
+});
+
+test("searchWithMeta: hits match search() on a normal query", () => {
+  const store = storeWith({ id: 1, title: "", body: "alpha beta" });
+  const out = fts5SearchWithMeta(store, "alpha", { tone: "strict" });
+  assert.deepEqual(out.hits, fts5Search(store, "alpha", { tone: "strict" }));
+  assert.equal(out.truncated, false);
+  store.close();
+});
+
+/* ------------------------------------------------------------------ *
+ * TASK-013: engine-level defaults vs an explicit `undefined` override
+ * ------------------------------------------------------------------ */
+
+test("createFts5Engine: a default allTerms survives an explicit undefined override", () => {
+  const eng = createFts5Engine({ memory: true, allTerms: true });
+  try {
+    eng.addMany([
+      { id: 1, title: "", body: "alpha" },
+      { id: 2, title: "", body: "beta" },
+      { id: 3, title: "", body: "alpha beta" },
+    ]);
+    assert.deepEqual(
+      eng.search("alpha beta", { tone: "strict" }).map((r) => r.id),
+      [3],
+      "the engine default must AND the chunks"
+    );
+    assert.deepEqual(
+      eng.search("alpha beta", { tone: "strict", allTerms: undefined }).map((r) => r.id),
+      [3],
+      "{ allTerms: undefined } must NOT clobber the engine default"
+    );
+    assert.deepEqual(
+      eng.search("alpha beta", { tone: "strict", allTerms: false }).map((r) => r.id).sort(),
+      [1, 2, 3],
+      "an explicit false still overrides the default"
+    );
+  } finally {
+    eng.close();
+  }
 });

@@ -22,9 +22,20 @@
  * requested (strict first, loose only while strict is short of `limit`): a
  * `bool.should` of `match_phrase` queries (OR across chunks,
  * `minimum_should_match: 1`), `size` = the clamped limit. Hits are merged
- * strict-then-loose in JS, deduped by `_id`, ranked by `_score` when the
- * server provides it (server order otherwise), and capped at
- * `clampLimit(limit)`.
+ * strict-then-loose in JS, deduped by BASE id (an optional `::loose` suffix is
+ * stripped), ranked by `_score` when the server provides it (server order
+ * otherwise), and capped at `clampLimit(limit)`. `searchWithMeta()` returns the
+ * same hits plus the query-level `truncated` flag, observable even when a
+ * capped query matched nothing.
+ *
+ * **Bulk indexing.** `addMany(docs)` accepts a sync OR async iterable and sends
+ * ONE `POST /_bulk` with `Content-Type: application/x-ndjson`, one
+ * `{"index":{"_index":..,"_id":..}}` action line + document line per CHANNEL doc
+ * of every logical document (strict id = base id, loose id = `<base>::loose`),
+ * trailing newline included. An empty batch sends nothing. `_bulk` is not
+ * transactional: when the response reports `errors: true` the call throws an
+ * `Error` that lists every failed id (the successful items DO stay indexed —
+ * replaying the batch is idempotent because ids are explicit).
  *
  * **Not supported here (documented, not faked):** verified raw offsets
  * (`offsets` → no `quote`/`start`/`end` — the server only sees the indexed
@@ -61,10 +72,10 @@ import {
   type HttpSearchEngine,
 } from "../_http.js";
 import {
-  registerEngine,
-  type ThaiEngineFactory,
+  registerAsyncEngine,
   type ThaiEngineOptions,
   type ThaiSearchDoc,
+  type ThaiSearchOutcome,
   type ThaiSearchResult,
 } from "../engine.js";
 
@@ -95,10 +106,46 @@ function phraseSearchBody(
   };
 }
 
+/** Strip the optional `::loose` suffix from an ES `_id` so a loose twin never
+ * duplicates its strict hit (and the base id round-trips to its original). */
+function baseIdOf(docId: string): string {
+  return docId.endsWith("::loose") ? docId.slice(0, -"::loose".length) : docId;
+}
+
+/** One `_bulk` item entry: `_id` plus the 2xx `status` / `error` the server
+ * reports per action. */
+interface BulkItem {
+  _id?: string;
+  status?: number;
+  error?: unknown;
+}
+
+/** Ids whose `_bulk` item failed (an `error` payload or a non-2xx `status`),
+ * de-duplicated in response order. */
+function failedBulkIds(res: { items?: unknown }): string[] {
+  const out = new Set<string>();
+  const items = Array.isArray(res.items) ? res.items : [];
+  for (const raw of items) {
+    if (raw === null || typeof raw !== "object") continue;
+    for (const action of Object.values(raw as Record<string, unknown>)) {
+      if (action === null || typeof action !== "object") continue;
+      const item = action as BulkItem;
+      const status = typeof item.status === "number" ? item.status : 200;
+      const bad =
+        (item.error !== undefined && item.error !== null) ||
+        status < 200 ||
+        status >= 300;
+      if (!bad) continue;
+      out.add(item._id !== undefined ? String(item._id) : "(unknown)");
+    }
+  }
+  return [...out];
+}
+
 /**
  * Build a `HttpSearchEngine` over an Elasticsearch server (Node ≥ 18 global
- * `fetch`, no SDK). See the module header for the two-field channel model and
- * the unsupported-features list.
+ * `fetch`, no SDK). See the module header for the channel model and the
+ * unsupported-features list.
  */
 export function createElasticsearchEngine(
   opts: ElasticsearchEngineOptions
@@ -157,31 +204,112 @@ export function createElasticsearchEngine(
     );
   };
 
-  const remove = async (id: string | number): Promise<void> => {
-    assertOpen();
-    ids.drop(id);
-    try {
-      await requestJSON(
-        endpoint,
-        `/${index}/_doc/${encodeURIComponent(String(id))}`,
-        "DELETE",
-        { headers }
+  /** The two channel docs for ONE logical document, each with just the token
+   * field its channel is searched on: strict (`_id` = base id, `th_token`) and
+   * loose (`_id` = `<base>::loose`, `th_token_loose`). Both carry the raw
+   * display text, never searched. */
+  const channelBulkDocs = (
+    doc: ThaiSearchDoc,
+    method: "add" | "addMany"
+  ): Array<{ _id: string; payload: Record<string, string> }> => {
+    if (doc == null || doc.id === null || doc.id === undefined) {
+      throw new TypeError(
+        `elasticsearch engine ${method}() requires a document with an id`
       );
-    } catch (err) {
-      // 404 = the document is already gone; remove() is a documented
-      // no-op when absent. Any other error propagates.
-      if (!String((err as Error).message).includes("HTTP 404")) throw err;
+    }
+    const title = String(doc.title ?? "");
+    const body = String(doc.body ?? "");
+    const strictTitle = buildIndexPayload(title, stopwords, stem);
+    const strictBody = buildIndexPayload(body, stopwords, stem);
+    const baseId = String(doc.id);
+    ids.track(doc.id);
+    return [
+      {
+        _id: baseId,
+        payload: {
+          th_token: [strictTitle, strictBody].filter(Boolean).join(" "),
+          th_title: title,
+          th_body: body,
+        },
+      },
+      {
+        _id: `${baseId}::loose`,
+        payload: {
+          th_token_loose: [looseForm(strictTitle), looseForm(strictBody)]
+            .filter(Boolean)
+            .join(" "),
+          th_title: title,
+          th_body: body,
+        },
+      },
+    ];
+  };
+
+  /**
+   * Bulk-index every document with ONE `_bulk` request: an NDJSON stream of
+   * `{"index":{"_index","_id"}}` action lines followed by their document lines,
+   * for BOTH channel docs of each logical document, ending with a newline.
+   * Accepts sync and async iterables; an empty batch sends no request. A
+   * response carrying `errors: true` rejects with an Error naming the failed
+   * ids.
+   */
+  const addMany = async (
+    docs: Iterable<ThaiSearchDoc> | AsyncIterable<ThaiSearchDoc>
+  ): Promise<void> => {
+    assertOpen();
+    const lines: string[] = [];
+    for await (const doc of docs) {
+      for (const entry of channelBulkDocs(doc, "addMany")) {
+        lines.push(JSON.stringify({ index: { _index: index, _id: entry._id } }));
+        lines.push(JSON.stringify(entry.payload));
+      }
+    }
+    if (lines.length === 0) return;
+    const res = (await requestJSON(endpoint, "/_bulk", "POST", {
+      headers,
+      rawBody: `${lines.join("\n")}\n`,
+      contentType: "application/x-ndjson",
+    })) as { errors?: unknown; items?: unknown } | null;
+    if (res?.errors === true) {
+      const failed = failedBulkIds(res);
+      throw new Error(
+        `elasticsearch bulk index failed for ids: ${
+          failed.length > 0 ? failed.join(", ") : "(server reported errors)"
+        }`
+      );
     }
   };
 
-  const search = async (
+  const remove = async (id: string | number): Promise<void> => {
+    assertOpen();
+    ids.drop(id);
+    for (const docId of [String(id), `${id}::loose`]) {
+      try {
+        await requestJSON(
+          endpoint,
+          `/${index}/_doc/${encodeURIComponent(docId)}`,
+          "DELETE",
+          { headers }
+        );
+      } catch (err) {
+        // 404 = the document is already gone; remove() is a documented
+        // no-op when absent. Any other error propagates.
+        if (!String((err as Error).message).includes("HTTP 404")) throw err;
+      }
+    }
+  };
+
+  /** Shared search pipeline: hits plus the query-level truncation flag (see
+   * `ThaiSearchOutcome`). `truncated` comes from the shared chunk plan, so a
+   * capped query reports it even when nothing matched. */
+  const searchOutcome = async (
     query: string,
     sOpts?: ThaiEngineOptions
-  ): Promise<ThaiSearchResult[]> => {
+  ): Promise<ThaiSearchOutcome> => {
     assertOpen();
     const s = sOpts ?? {};
     const trimmed = String(query ?? "").trim();
-    if (!trimmed) return [];
+    if (!trimmed) return { hits: [], truncated: false };
     const limit = clampLimit(s.limit ?? base.limit);
     const tone = resolveToneMode(s.tone ?? base.tone);
     // Symmetric query pipeline (same index-time stopwords/stem as add()).
@@ -215,10 +343,12 @@ export function createElasticsearchEngine(
       for (const hit of hits) {
         if (out.length >= limit) break;
         const rawId = String((hit as Record<string, unknown>)?._id ?? "");
-        if (!rawId || seen.has(rawId)) continue;
-        seen.add(rawId);
+        if (!rawId) continue;
+        const baseId = baseIdOf(rawId);
+        if (seen.has(baseId)) continue;
+        seen.add(baseId);
         out.push({
-          id: ids.restore(rawId),
+          id: ids.restore(baseId),
           rank: out.length + 1,
           meta: truncated ? { method: "elasticsearch", channel, truncated: true } : { method: "elasticsearch", channel },
         });
@@ -226,8 +356,8 @@ export function createElasticsearchEngine(
     };
 
     // Strict-then-loose contract (fts5/memory semantics): strict hits rank
-    // first; loose only fills the remaining limit; ids dedupe so a doc hit on
-    // both channels appears once (its strict channel wins).
+    // first; loose only fills the remaining limit; ids dedupe by base id so a
+    // loose twin never duplicates a strict hit.
     if (tone === "strict") {
       await push(strict, "strict");
     } else if (tone === "loose") {
@@ -236,14 +366,22 @@ export function createElasticsearchEngine(
       await push(strict, "strict");
       await push(loose, "loose");
     }
-    return out;
+    return { hits: out, truncated };
   };
+
+  const search = async (
+    query: string,
+    sOpts?: ThaiEngineOptions
+  ): Promise<ThaiSearchResult[]> => (await searchOutcome(query, sOpts)).hits;
 
   return {
     type: "elasticsearch",
+    async: true,
     add,
+    addMany,
     remove,
     search,
+    searchWithMeta: searchOutcome,
     close() {
       // No local resources to release; closing only seals the engine.
       closed = true;
@@ -251,9 +389,6 @@ export function createElasticsearchEngine(
   };
 }
 
-// Pre-register the reference adapter under its name so
-// `createEngine("elasticsearch")` works out of the box.
-registerEngine(
-  "elasticsearch",
-  createElasticsearchEngine as unknown as ThaiEngineFactory
-);
+// Pre-register the reference adapter as an ASYNC engine so
+// `createAsyncEngine("elasticsearch")` works out of the box.
+registerAsyncEngine("elasticsearch", createElasticsearchEngine);

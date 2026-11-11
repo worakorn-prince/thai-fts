@@ -12,10 +12,15 @@ const {
   createMeilisearchEngine,
   createElasticsearchEngine,
   createEngine,
+  createAsyncEngine,
+  isAsyncEngine,
+  listAsyncEngines,
 } = await import("../../dist/index.js");
 
 /** Start a fake server on 127.0.0.1:<ephemeral> that records every request
- * and answers via `handler(record) -> 200 | { status?, body? }`. */
+ * and answers via `handler(record) -> 200 | { status?, body? }`. `record.body`
+ * is the JSON-parsed body (null for an empty OR non-JSON body); `record.rawBody`
+ * always holds the exact bytes, for NDJSON (`_bulk`) assertions. */
 function startFakeServer(handler) {
   const requests = [];
   const server = http.createServer((req, res) => {
@@ -24,11 +29,20 @@ function startFakeServer(handler) {
       body += c;
     });
     req.on("end", () => {
+      let parsed = null;
+      if (body) {
+        try {
+          parsed = JSON.parse(body);
+        } catch {
+          parsed = null;
+        }
+      }
       const record = {
         method: req.method,
         path: req.url,
         headers: req.headers,
-        body: body ? JSON.parse(body) : null,
+        body: parsed,
+        rawBody: body,
       };
       requests.push(record);
       const out = handler(record);
@@ -56,13 +70,36 @@ function startFakeServer(handler) {
   });
 }
 
-test("registry: 'meilisearch' and 'elasticsearch' are registered", async () => {
-  const m = createEngine("meilisearch", { endpoint: "http://127.0.0.1:9", index: "x" });
+test("registry: HTTP adapters are ASYNC engines (createAsyncEngine, not createEngine)", async () => {
+  // The sync creator refuses an async-registered name and names the right API.
+  assert.throws(
+    () => createEngine("meilisearch", { endpoint: "http://127.0.0.1:9", index: "x" }),
+    /createAsyncEngine/
+  );
+  assert.throws(
+    () => createEngine("elasticsearch", { endpoint: "http://127.0.0.1:9", index: "x" }),
+    /createAsyncEngine/
+  );
+  const m = createAsyncEngine("meilisearch", {
+    endpoint: "http://127.0.0.1:9",
+    index: "x",
+  });
   assert.equal(m.type, "meilisearch");
+  assert.equal(isAsyncEngine(m), true);
+  assert.equal(typeof m.searchWithMeta, "function");
+  assert.equal(typeof m.addMany, "function");
   m.close();
-  const e = createEngine("elasticsearch", { endpoint: "http://127.0.0.1:9", index: "x" });
+  const e = createAsyncEngine("elasticsearch", {
+    endpoint: "http://127.0.0.1:9",
+    index: "x",
+  });
   assert.equal(e.type, "elasticsearch");
+  assert.equal(isAsyncEngine(e), true);
   e.close();
+  const names = listAsyncEngines();
+  assert.ok(names.includes("meilisearch"), `async engines: ${names}`);
+  assert.ok(names.includes("elasticsearch"), `async engines: ${names}`);
+  assert.ok(!listAsyncEngines().includes("fts5"), "sync engines stay out of the list");
 });
 
 test("meilisearch add: POSTs the two-doc batch (strict + loose payloads)", async () => {
@@ -395,5 +432,217 @@ test("elasticsearch: non-2xx rejects; remove swallows 404; closed throws", async
   await eng.remove("a"); // 404 is swallowed: remove() is a no-op when absent
   eng.close();
   await assert.rejects(eng.search("ติดตั้ง"), /Search engine is closed/);
+  await srv.close();
+});
+
+/* ------------------------------------------------------------------ *
+ * TASK-013 W2: addMany (bulk) + searchWithMeta (0-hit truncation)
+ * ------------------------------------------------------------------ */
+
+/** Wrap docs in an async generator (the `AsyncIterable` addMany input). */
+async function* asyncDocs(docs) {
+  for (const doc of docs) yield doc;
+}
+
+test("meilisearch addMany: ONE request with both channel docs per logical doc", async () => {
+  const srv = await startFakeServer(() => 200);
+  const eng = createMeilisearchEngine({ endpoint: srv.endpoint, index: "docs" });
+  await eng.addMany([
+    { id: 1, title: "คู่มือ", body: "ติดตั้งโปรแกรม" },
+    { id: 2, body: "alpha beta" },
+  ]);
+  assert.equal(srv.requests.length, 1, "a whole batch is ONE documents POST");
+  const req = srv.requests[0];
+  assert.equal(req.method, "POST");
+  assert.equal(req.path, "/indexes/docs/documents");
+  assert.equal(req.headers["content-type"], "application/json");
+  assert.ok(Array.isArray(req.body));
+  assert.equal(req.body.length, 4, "two channel docs per logical doc");
+  assert.deepEqual(
+    req.body.map((d) => d.id),
+    ["1", "1::loose", "2", "2::loose"]
+  );
+  assert.deepEqual(
+    req.body.map((d) => d.th_channel),
+    ["strict", "loose", "strict", "loose"]
+  );
+  // Same builders as add(): strict keeps the tone mark, loose strips it.
+  assert.ok(req.body[0].th_body.includes("\u{e15}\u{e31}\u{e49}\u{e07}"));
+  assert.ok(req.body[1].th_body.includes("\u{e15}\u{e31}\u{e07}"));
+  assert.ok(!req.body[1].th_body.includes("\u{e15}\u{e31}\u{e49}\u{e07}"));
+  eng.close();
+  await srv.close();
+});
+
+test("meilisearch addMany: AsyncIterable works; an empty batch sends nothing", async () => {
+  const srv = await startFakeServer(() => 200);
+  const eng = createMeilisearchEngine({ endpoint: srv.endpoint, index: "docs" });
+  await eng.addMany(asyncDocs([{ id: 3, body: "alpha" }]));
+  assert.equal(srv.requests.length, 1);
+  assert.deepEqual(
+    srv.requests[0].body.map((d) => d.id),
+    ["3", "3::loose"]
+  );
+  const afterIterable = srv.requests.length;
+  await eng.addMany([]);
+  assert.equal(srv.requests.length, afterIterable, "empty array: 0 requests");
+  await eng.addMany(asyncDocs([]));
+  assert.equal(srv.requests.length, afterIterable, "empty async batch: 0 requests");
+  eng.close();
+  await assert.rejects(
+    eng.addMany([{ id: 4, body: "x" }]),
+    /Search engine is closed/
+  );
+  await srv.close();
+});
+
+test("elasticsearch addMany: ONE _bulk request, NDJSON action+doc pairs for both channels", async () => {
+  const srv = await startFakeServer(() => 200);
+  const eng = createElasticsearchEngine({ endpoint: srv.endpoint, index: "docs" });
+  await eng.addMany([
+    { id: 1, title: "คู่มือ", body: "ติดตั้งโปรแกรม" },
+    { id: 2, body: "alpha beta" },
+  ]);
+  assert.equal(srv.requests.length, 1, "a whole batch is ONE _bulk POST");
+  const req = srv.requests[0];
+  assert.equal(req.method, "POST");
+  assert.equal(req.path, "/_bulk");
+  assert.ok(
+    req.headers["content-type"].startsWith("application/x-ndjson"),
+    `content-type: ${req.headers["content-type"]}`
+  );
+  assert.ok(req.rawBody.endsWith("\n"), "the NDJSON body ends with a newline");
+  const lines = req.rawBody.split("\n");
+  assert.equal(lines.at(-1), "", "trailing newline");
+  const bodyLines = lines.slice(0, -1);
+  assert.equal(bodyLines.length, 8, "4 action lines + 4 doc lines");
+  const actions = [];
+  const docs = [];
+  for (let i = 0; i < bodyLines.length; i += 2) {
+    actions.push(JSON.parse(bodyLines[i]));
+    docs.push(JSON.parse(bodyLines[i + 1]));
+  }
+  assert.deepEqual(
+    actions.map((a) => a.index._id),
+    ["1", "1::loose", "2", "2::loose"]
+  );
+  assert.deepEqual(
+    actions.map((a) => a.index._index),
+    ["docs", "docs", "docs", "docs"]
+  );
+  // Strict doc carries th_token, its loose twin th_token_loose.
+  assert.ok(docs[0].th_token.includes("\u{e15}\u{e31}\u{e49}\u{e07}"));
+  assert.equal(docs[0].th_token_loose, undefined);
+  assert.ok(docs[1].th_token_loose.includes("\u{e15}\u{e31}\u{e07}"));
+  assert.ok(!docs[1].th_token_loose.includes("\u{e15}\u{e31}\u{e49}\u{e07}"));
+  assert.equal(docs[1].th_token, undefined);
+  eng.close();
+  await srv.close();
+});
+
+test("elasticsearch addMany: AsyncIterable works; an empty batch sends nothing", async () => {
+  const srv = await startFakeServer(() => 200);
+  const eng = createElasticsearchEngine({ endpoint: srv.endpoint, index: "docs" });
+  await eng.addMany(asyncDocs([{ id: 3, body: "alpha" }]));
+  assert.equal(srv.requests.length, 1);
+  assert.equal(srv.requests[0].path, "/_bulk");
+  const afterIterable = srv.requests.length;
+  await eng.addMany([]);
+  assert.equal(srv.requests.length, afterIterable, "empty array: 0 requests");
+  await eng.addMany(asyncDocs([]));
+  assert.equal(srv.requests.length, afterIterable, "empty async batch: 0 requests");
+  eng.close();
+  await assert.rejects(
+    eng.addMany([{ id: 4, body: "x" }]),
+    /Search engine is closed/
+  );
+  await srv.close();
+});
+
+test("elasticsearch addMany: errors:true in the _bulk response rejects naming the failed id", async () => {
+  const srv = await startFakeServer((rec) => {
+    if (rec.method === "POST" && rec.path === "/_bulk") {
+      return {
+        body: {
+          errors: true,
+          items: [
+            { index: { _index: "docs", _id: "1", status: 201 } },
+            { index: { _index: "docs", _id: "1::loose", status: 201 } },
+            {
+              index: {
+                _index: "docs",
+                _id: "2",
+                status: 400,
+                error: { type: "mapper_parsing_exception" },
+              },
+            },
+            { index: { _index: "docs", _id: "2::loose", status: 201 } },
+          ],
+        },
+      };
+    }
+    return 200;
+  });
+  const eng = createElasticsearchEngine({ endpoint: srv.endpoint, index: "docs" });
+  await assert.rejects(
+    eng.addMany([
+      { id: 1, body: "alpha" },
+      { id: 2, body: "beta" },
+    ]),
+    /ids: 2$/
+  );
+  assert.equal(srv.requests.length, 1);
+  eng.close();
+  await srv.close();
+});
+
+test("meilisearch searchWithMeta: truncated stays true for a 0-hit capped query", async () => {
+  const srv = await startFakeServer((rec) => {
+    if (rec.method === "POST" && rec.path === "/indexes/docs/search") {
+      const q = String(rec.body.q);
+      return {
+        body: { hits: q.includes("chunkword") ? [] : [{ id: "a", _rankingScore: 1 }] },
+      };
+    }
+    return 200;
+  });
+  const eng = createMeilisearchEngine({ endpoint: srv.endpoint, index: "docs" });
+  const words = Array.from({ length: 9 }, (_, i) => `chunkword${i}`);
+  const capped = await eng.searchWithMeta(words.join(" "), { tone: "strict" });
+  assert.deepEqual(capped.hits, []);
+  assert.equal(capped.truncated, true, "no hits must not read as a complete result");
+  const open = await eng.searchWithMeta("alpha beta", { tone: "strict" });
+  assert.deepEqual(open.hits.map((h) => h.id), ["a"]);
+  assert.equal(open.truncated, false);
+  // search() unchanged: just the hits array, same objects as searchWithMeta.
+  const hits = await eng.search("alpha beta", { tone: "strict" });
+  assert.deepEqual(hits, open.hits);
+  eng.close();
+  await srv.close();
+});
+
+test("elasticsearch searchWithMeta: truncated stays true for a 0-hit capped query", async () => {
+  const srv = await startFakeServer((rec) => {
+    if (rec.method === "POST" && rec.path === "/docs/_search") {
+      const q = JSON.stringify(rec.body.query);
+      return {
+        body: {
+          hits: { hits: q.includes("chunkword") ? [] : [{ _id: "a", _score: 1 }] },
+        },
+      };
+    }
+    return 200;
+  });
+  const eng = createElasticsearchEngine({ endpoint: srv.endpoint, index: "docs" });
+  const words = Array.from({ length: 9 }, (_, i) => `chunkword${i}`);
+  const capped = await eng.searchWithMeta(words.join(" "), { tone: "strict" });
+  assert.deepEqual(capped.hits, []);
+  assert.equal(capped.truncated, true, "no hits must not read as a complete result");
+  const open = await eng.searchWithMeta("alpha beta", { tone: "strict" });
+  assert.deepEqual(open.hits.map((h) => h.id), ["a"]);
+  assert.equal(open.truncated, false);
+  const hits = await eng.search("alpha beta", { tone: "strict" });
+  assert.deepEqual(hits, open.hits);
+  eng.close();
   await srv.close();
 });

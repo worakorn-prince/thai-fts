@@ -14,19 +14,43 @@
 import type { ThaiDictionaryDef } from "../../core/types.js";
 import {
   registerEngine,
-  type ThaiEngineFactory,
   type ThaiEngineOptions,
   type ThaiSearchDoc,
   type ThaiSearchEngine,
+  type ThaiSearchOutcome,
 } from "../engine.js";
 import { openFts5Store } from "./store.js";
-import { fts5Search } from "./search.js";
+import { fts5Search, fts5SearchWithMeta } from "./search.js";
+import type { Fts5SearchOptions } from "./search.js";
 
 export { FTS5_STRICT_SCHEMA, FTS5_LOOSE_SCHEMA } from "./schema.js";
 export { openFts5Store } from "./store.js";
 export type { OpenFts5StoreOptions, Fts5Store, Fts5DocRow } from "./store.js";
-export { fts5Search } from "./search.js";
+export { fts5Search, fts5SearchWithMeta } from "./search.js";
 export type { Fts5SearchOptions, Fts5Candidate } from "./search.js";
+
+/**
+ * Merge per-search options over the engine-level defaults using
+ * DEFINED-KEYS-ONLY semantics: an explicitly `undefined` value in `override`
+ * (e.g. `{ allTerms: undefined }`) is treated as "not given", so it can never
+ * clobber a default set at create time. Mirrors the memory adapter's
+ * `!== undefined` checks, keeping both adapters' option resolution identical.
+ */
+function withDefined(
+  base: Fts5SearchOptions,
+  override: Fts5SearchOptions | undefined
+): Fts5SearchOptions {
+  const merged: Fts5SearchOptions = { ...base };
+  if (!override) return merged;
+  if (override.tone !== undefined) merged.tone = override.tone;
+  if (override.limit !== undefined) merged.limit = override.limit;
+  if (override.prefix !== undefined) merged.prefix = override.prefix;
+  if (override.offsets !== undefined) merged.offsets = override.offsets;
+  if (override.titleWeight !== undefined) merged.titleWeight = override.titleWeight;
+  if (override.allTerms !== undefined) merged.allTerms = override.allTerms;
+  if (override.filter !== undefined) merged.filter = override.filter;
+  return merged;
+}
 
 /** Options accepted by `createFts5Engine`. `tone`/`limit`/`prefix`/`offsets`/
  * `titleWeight` become defaults for `search()` (per-call options override
@@ -59,7 +83,9 @@ export interface Fts5EngineOptions extends Omit<ThaiEngineOptions, "prefix"> {
  * Build a `ThaiSearchEngine` over a new FTS5 store. `tone`/`limit` and the
  * search features given here become search defaults; with neither, the store
  * defaults to a `:memory:` database and strict-first dual-channel tone
- * handling.
+ * handling. The returned engine exposes both `search()` (hits only) and
+ * `searchWithMeta()` (`{ hits, truncated }`), so the query-level truncation
+ * flag is observable even when a capped query returns zero hits.
  */
 export function createFts5Engine(opts: Fts5EngineOptions = {}): ThaiSearchEngine {
   const store = openFts5Store({
@@ -94,7 +120,11 @@ export function createFts5Engine(opts: Fts5EngineOptions = {}): ThaiSearchEngine
     },
     search(query, searchOpts) {
       if (closed) throw new Error("Search engine is closed");
-      return fts5Search(store, query, { ...base, ...searchOpts });
+      return fts5Search(store, query, withDefined(base, searchOpts));
+    },
+    searchWithMeta(query, searchOpts): ThaiSearchOutcome {
+      if (closed) throw new Error("Search engine is closed");
+      return fts5SearchWithMeta(store, query, withDefined(base, searchOpts));
     },
     close() {
       if (!closed) {
@@ -107,4 +137,4 @@ export function createFts5Engine(opts: Fts5EngineOptions = {}): ThaiSearchEngine
 
 // Pre-register the reference adapter under its name so `createEngine("fts5")`
 // works out of the box, alongside any future engines registered by the app.
-registerEngine("fts5", createFts5Engine as unknown as ThaiEngineFactory);
+registerEngine("fts5", createFts5Engine);

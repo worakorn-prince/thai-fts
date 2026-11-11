@@ -14,19 +14,25 @@
  * indexing buys. Measured against the built `dist/` bundle only, mirroring
  * `benchmark/run.mjs`.
  *
- * The corpus (POOL), SEED and PREFIX_INDEX are extracted from
- * `benchmark/run.mjs` at runtime instead of duplicated, so both harnesses
- * index byte-identical documents from one source of truth. (run.mjs
- * self-executes its suite on import, so its helpers cannot simply be
- * imported without running the whole thing.)
+ * The corpus (POOL), SEED, PREFIX_INDEX and the seed helpers (mulberry32,
+ * buildDocs, corpusBytes) come from `benchmark/lib.mjs` — the same module
+ * `benchmark/run.mjs` imports — so both harnesses index byte-identical
+ * documents from one source of truth.
  *
  * Modes: --n=<int> (default 20000) | --quick (N=500). Env
  * THAI_FTS_BENCH_N also works. Results land in
  * benchmark/results/addmany-<stamp>.json.
  */
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, writeFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
+
+import {
+  PREFIX_INDEX,
+  SEED,
+  buildDocs,
+  corpusBytes,
+} from "./lib.mjs";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const ROOT = resolve(HERE, "..");
@@ -38,55 +44,6 @@ if (!existsSync(DIST)) {
 }
 
 const { createFts5Engine, getThaiSegmenterInfo } = await import(pathToFileURL(DIST).href);
-
-// --- corpus (extracted from run.mjs — single source of truth) -------------
-
-const runSrc = readFileSync(join(HERE, "run.mjs"), "utf8");
-const poolBlock = runSrc.match(/const POOL = \[([\s\S]*?)\n\];/);
-const seedMatch = runSrc.match(/const SEED = (\d+);/);
-const prefixMatch = runSrc.match(/const PREFIX_INDEX = (\[[^\]]*\]);/);
-if (!poolBlock || !seedMatch || !prefixMatch) {
-  throw new Error("could not extract POOL/SEED/PREFIX_INDEX from benchmark/run.mjs — keep the two harnesses aligned");
-}
-const POOL = poolBlock[1]
-  .split("\n")
-  .map((line) => line.trim())
-  .filter((line) => line.startsWith('"'))
-  .map((line) => JSON.parse(line.replace(/,$/, "")));
-const SEED = Number(seedMatch[1]);
-const PREFIX_INDEX = JSON.parse(prefixMatch[1]);
-if (!POOL.length || !Number.isFinite(SEED) || !Array.isArray(PREFIX_INDEX)) {
-  throw new Error("extraction from benchmark/run.mjs produced an invalid corpus");
-}
-
-function mulberry32(a) {
-  let s = a >>> 0;
-  return function () {
-    s = (s + 0x6d2b79f5) >>> 0;
-    let t = Math.imul(s ^ (s >>> 15), 1 | s);
-    t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
-    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
-  };
-}
-
-/** Same shape as run.mjs buildDocs(): seeded picks of POOL paragraphs per doc. */
-function buildDocs(n) {
-  const rnd = mulberry32(SEED);
-  const docs = [];
-  for (let i = 0; i < n; i++) {
-    const parts = [];
-    const k = 2 + Math.floor(rnd() * 2);
-    for (let j = 0; j < k; j++) parts.push(POOL[Math.floor(rnd() * POOL.length)]);
-    docs.push({ id: i, title: POOL[i % POOL.length].slice(0, 60), body: parts.join(" ") });
-  }
-  return docs;
-}
-
-function corpusBytes(docs) {
-  let b = 0;
-  for (const d of docs) b += Buffer.byteLength(d.title, "utf8") + Buffer.byteLength(d.body, "utf8");
-  return b;
-}
 
 // --- measurement -----------------------------------------------------------
 

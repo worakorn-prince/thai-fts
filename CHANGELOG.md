@@ -45,15 +45,44 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   by the Meilisearch / Elasticsearch adapters.
 - **`BuiltQuery.truncated`** — the exported `BuiltQuery` now carries
   `truncated: boolean` (additive field) next to `match` / `looseMatch`.
+- **`ThaiAsyncEngine` + async registry** — the registry now records which kind
+  owns a name: `registerAsyncEngine` / `createAsyncEngine` /
+  `listAsyncEngines` / `isAsyncEngine` alongside the sync
+  `registerEngine` / `createEngine`. Calling the wrong creator throws an error
+  naming the right one instead of returning a Promise typed as an engine.
+- **`addMany()` on Meilisearch / Elasticsearch** — accepts
+  `Iterable | AsyncIterable`; an empty batch sends no request. Meilisearch
+  sends one atomic `POST /indexes/{index}/documents` array; Elasticsearch
+  sends one `POST /_bulk` NDJSON that is **not** atomic — successful items
+  stay indexed, and the thrown error names the failed ids.
+- **`searchWithMeta()` + `ThaiSearchOutcome`** — returns `{ hits, truncated }`
+  so a query capped at the 8-chunk analyzer limit is visible even when it
+  produced zero hits; implemented by fts5, memory, Meilisearch and
+  Elasticsearch (optional method, feature-detect like `addMany`).
+- **Typed `ThaiSearchMeta`** — `ThaiSearchResult.meta` is now the shared
+  `ThaiSearchMeta` (`method`, `channel`, `truncated?: true`) intersected with
+  `Record<string, unknown>`, so the common diagnostics are typed while
+  adapter-specific keys remain allowed.
 
-### Fixed (QA pass on the FTS5 adapter)
+### Fixed
 
-- **BUG-1** — a query consisting only of stopwords no longer crashes
-  `fts5Search` (empty-MATCH guard; an empty channel is skipped).
-- **BUG-2** — `engine.search()` after `close()` now throws the same clear
-  `"Search engine is closed"` error as `add`/`remove`.
-- **BUG-3** — `store.get()` / `store.allRows()` after `close()` now throw a
-  clear `"store is closed"` error instead of leaking
+- **Engine defaults merged by defined keys only** — an explicit `undefined`
+  in per-search options (e.g. `{ allTerms: undefined }`) is treated as "not
+  given", so it no longer clobbers an engine-level default such as
+  `createFts5Engine({ allTerms: true })`; fts5 now mirrors the memory
+  adapter's resolution.
+- **Rollback no longer masks the original error** — a failed `ROLLBACK` in the
+  fts5 store is swallowed, so the caller always sees the insert/batch failure
+  that triggered it; `addMany` keeps its all-or-nothing contract.
+- **One truncation source** — the 8-chunk cap is computed by the shared
+  `planQueryChunks()` helper instead of two separate copies, so the fts5,
+  memory, offset-align and HTTP paths cannot drift apart.
+- **QA pass on the FTS5 adapter** — **BUG-1**: a query consisting only of
+  stopwords no longer crashes `fts5Search` (empty-MATCH guard; an empty channel
+  is skipped). **BUG-2**: `engine.search()` after `close()` now throws the same
+  clear `"Search engine is closed"` error as `add`/`remove`. **BUG-3**:
+  `store.get()` / `store.allRows()` after `close()` now throw a clear
+  `"store is closed"` error instead of leaking
   `statement has been finalized`.
 
 ## [0.1.0] — 2026-11-11

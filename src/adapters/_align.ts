@@ -20,7 +20,6 @@
 import {
   hasThai,
   looseForm,
-  normalizeThaiInput,
   segmentForIndex,
   segmentQueryChunk,
 } from "../core/segment.js";
@@ -31,7 +30,7 @@ import {
   filterStopwordsLoose,
 } from "../core/stopwords.js";
 import { stemEn } from "../core/stem.js";
-import { MAX_QUERY_CHUNKS } from "../core/query.js";
+import { planQueryChunks } from "../core/query.js";
 
 /** Verified raw-text offset of a matched region (RAW document coordinates). */
 export interface VerifiedOffset {
@@ -74,7 +73,7 @@ export function mapSegmentedToRaw(
     c === " " || c === "\t" || c === "\n" || c === "\r" || c === "\f" || c === "\v";
   let ri = 0;
   for (let i = 0; i < seg.length; i++) {
-    const ch = seg[i] as string;
+    const ch = seg[i]!;
     if (isWs(ch)) {
       out.push(null);
       continue;
@@ -120,14 +119,14 @@ export function regionToRawOffsets(
   if (pos.length === 0) return undefined;
   let contiguous = true;
   for (let k = 1; k < pos.length; k++) {
-    if (pos[k] !== (pos[k - 1] as number) + 1) {
+    if (pos[k] !== pos[k - 1]! + 1) {
       contiguous = false;
       break;
     }
   }
   if (!contiguous) return undefined;
-  const start = pos[0] as number;
-  const end = (pos[pos.length - 1] as number) + 1;
+  const start = pos[0]!;
+  const end = pos[pos.length - 1]! + 1;
   const deSpaced = seg.replace(/\s+/g, "");
   const slice = raw.slice(start, end);
   if (slice !== deSpaced) return undefined;
@@ -185,7 +184,7 @@ export function makeSnippet(
 /** Snippet needles: raw chunks plus their segmented words, lowercased dedupe. */
 export function buildNeedles(query: string): string[] {
   const needles = new Set<string>();
-  for (const chunk of String(query ?? "").trim().split(/\s+/).filter(Boolean).slice(0, 8)) {
+  for (const chunk of planQueryChunks(query).chunks) {
     needles.add(chunk);
     for (const w of segmentQueryChunk(chunk)) needles.add(w);
   }
@@ -221,9 +220,10 @@ export interface ChannelPhrases {
   strict: string[][];
   /** Loose channel: the de-accented twin of `strict`. */
   loose: string[][];
-  /** True when the raw query held more than `MAX_QUERY_CHUNKS` chunks, so the
+  /** True when the raw query held more than the analyzer's chunk cap, so the
    * ones past the cap are absent from both channels. Adapters surface this as
-   * `meta.truncated` rather than letting a narrowed query read as complete. */
+   * `meta.truncated` / `searchWithMeta().truncated` rather than letting a
+   * narrowed query read as complete. */
   truncated: boolean;
 }
 
@@ -253,12 +253,9 @@ export function buildChannelPhrases(
   stopwords: readonly string[],
   stem: boolean
 ): ChannelPhrases {
-  const rawChunks = normalizeThaiInput(String(query ?? ""))
-    .trim()
-    .split(/\s+/)
-    .filter(Boolean);
-  const truncated = rawChunks.length > MAX_QUERY_CHUNKS;
-  const chunks = rawChunks.slice(0, MAX_QUERY_CHUNKS);
+  const plan = planQueryChunks(query);
+  const truncated = plan.truncated;
+  const chunks = plan.chunks;
   const strict: string[][] = [];
   const loose: string[][] = [];
   for (const chunk of chunks) {

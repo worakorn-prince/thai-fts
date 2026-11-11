@@ -6,8 +6,12 @@ import assert from "node:assert/strict";
 
 const {
   registerEngine,
+  registerAsyncEngine,
   createEngine,
+  createAsyncEngine,
   listEngines,
+  listAsyncEngines,
+  isAsyncEngine,
   createFts5Engine,
   unregisterAllEngines,
 } = await import("../dist/index.js");
@@ -141,4 +145,86 @@ test("an adapter without addMany simply omits it (the contract is optional)", ()
   }));
   const stub = createEngine("test:nobulk");
   assert.equal(stub.addMany, undefined, "callers must feature-detect, never assume");
+});
+
+/* ------------------------------------------------------------------ *
+ * TASK-013: sync/async registry split + cross-kind errors
+ * ------------------------------------------------------------------ */
+
+function asyncFactory() {
+  return {
+    type: "test:async-engine",
+    async: true,
+    async add() {},
+    async remove() {},
+    async search() {
+      return [];
+    },
+    close() {},
+  };
+}
+
+function syncFactory() {
+  return {
+    type: "test:sync-engine",
+    add: () => {},
+    remove: () => {},
+    search: () => [],
+    close: () => {},
+  };
+}
+
+test("registerAsyncEngine: createEngine on that name throws naming createAsyncEngine", () => {
+  registerAsyncEngine("test:async-only", asyncFactory);
+  assert.throws(
+    () => createEngine("test:async-only"),
+    /createAsyncEngine/,
+    "the error must point at the async creator"
+  );
+  const eng = createAsyncEngine("test:async-only");
+  assert.equal(eng.async, true, "the created engine carries the async brand");
+  assert.ok(listAsyncEngines().includes("test:async-only"), "listed as async");
+  assert.equal(
+    listEngines().includes("test:async-only"),
+    false,
+    "listEngines stays sync-only"
+  );
+  assert.equal(isAsyncEngine(eng), true);
+});
+
+test("createAsyncEngine on a sync-registered name throws naming createEngine", () => {
+  registerEngine("test:sync-only", syncFactory);
+  assert.throws(
+    () => createAsyncEngine("test:sync-only"),
+    /createEngine/,
+    "the error must point at the sync creator"
+  );
+  const eng = createEngine("test:sync-only");
+  assert.equal(listAsyncEngines().includes("test:sync-only"), false, "not an async name");
+  assert.equal(isAsyncEngine(eng), false, "a sync engine is never classified async");
+});
+
+test("isAsyncEngine: brand, registry type, and AsyncFunction add all classify async", () => {
+  // 1. explicit brand
+  assert.equal(isAsyncEngine(asyncFactory()), true);
+  // 2. registry-known type with an async registration (no brand)
+  registerAsyncEngine("test:brandless-type", () => ({
+    type: "test:brandless-type",
+    async add() {},
+    async remove() {},
+    async search() {
+      return [];
+    },
+    close() {},
+  }));
+  assert.equal(isAsyncEngine({ type: "test:brandless-type" }), true);
+  // 3. plain async `add` function, unknown type
+  assert.equal(
+    isAsyncEngine({ type: "unknown", add: async () => {}, remove: async () => {}, search: async () => [] }),
+    true
+  );
+  // negative: sync function, non-object, null
+  assert.equal(isAsyncEngine(syncFactory()), false);
+  assert.equal(isAsyncEngine(null), false);
+  assert.equal(isAsyncEngine("not an engine"), false);
 });

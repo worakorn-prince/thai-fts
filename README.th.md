@@ -149,23 +149,40 @@ thai-fts --json search "ติดตั้ง" --db db.sqlite          # { ok: t
 
 ### Engine — `thai-fts/engine`
 
-- `ThaiSearchEngine` — `{ add(doc), remove(id), search(query, opts?), close() }` — เพิ่ม `addMany(docs)` สำหรับ index แบบชุด เป็น method เสริมแบบ optional บน interface (ดูหัวข้อด้านล่าง)
-- `ThaiSearchDoc`, `ThaiSearchResult`, `ThaiEngineOptions`, `ThaiEngineFactory`
-- `registerEngine(name, factory)`, `createEngine(name, opts?)`, `listEngines()`, `unregisterAllEngines()`
+- `ThaiSearchEngine` — `{ add(doc), remove(id), search(query, opts?), close() }`; เมธอด `addMany(docs)` และ `searchWithMeta(query, opts?)` เป็น optional ของ interface (ดูด้านล่าง)
+- `ThaiAsyncEngine` — คู่แฝดแบบ async (`add`/`remove`/`search` คืน Promise, `close()` ยังเป็น sync) อิมพลีเมนต์โดย HTTP adapters
+- `ThaiSearchDoc`, `ThaiSearchResult`, `ThaiSearchMeta`, `ThaiSearchOutcome`, `ThaiEngineOptions`, `ThaiEngineFactory`, `ThaiAsyncEngineFactory`
+- `registerEngine(name, factory)`, `createEngine(name, opts?)`, `listEngines()`, `unregisterAllEngines()` — registry ฝั่ง sync
+- `registerAsyncEngine(name, factory)`, `createAsyncEngine(name, opts?)`, `listAsyncEngines()`, `isAsyncEngine(engine)` — registry ฝั่ง async (ดู [Sync and async engines](#sync-and-async-engines))
 - `createMemoryEngine(opts?)` → `ThaiSearchEngine` แบบ in-memory ที่ไม่มี dependencies เลย (สำหรับเทสต์/ออฟไลน์/ข้อมูลเล็ก) ลงทะเบียนเป็น `"memory"`
 - `createMeilisearchEngine({ endpoint, index, apiKey?, ... })`, `createElasticsearchEngine({ endpoint, index, apiKey?, ... })` → อะแดปเตอร์ HTTP แบบ reference ขั้นต่ำ (`add`/`remove`/`search` เป็น async — ดู `HttpSearchEngine`) ลงทะเบียนเป็น `"meilisearch"` / `"elasticsearch"`
-- `HttpSearchEngine` — คอนแทรกต์เอนจินแบบ async ที่อะแดปเตอร์ HTTP อิมพลีเมนต์ (`close()` ยังเป็น sync)
+- `HttpSearchEngine` — alias ของ `ThaiAsyncEngine` เก็บไว้ให้ import เดิมใช้ได้
 
 #### การ index แบบชุด — `addMany()` (optional)
 
-`addMany(docs)` index เอกสารทั้ง iterable ใน **transaction เดียว** แบบ all-or-nothing: ถ้าเอกสารตัวใดในชุดทำให้ error พุ่งขึ้นกลางคัน ทั้งชุดจะ rollback ทั้งหมด ดัชนีจึงกลับสู่สภาพเดิมก่อนโหลดทุกครั้ง มันเป็น optional บน `ThaiSearchEngine` (อะแดปเตอร์ HTTP แบบ reference ไม่ได้ implement มัน) จึงต้องตรวจก่อนแล้วค่อย fallback ไปหา `add`:
+`addMany(docs)` index เอกสารหลายฉบับใน **คำขอเดียวหรือ transaction เดียว** แบบ all-or-nothing เท่าที่ backend รองรับ มีให้ใช้บนเอนจินทั้งสองชนิดและเป็น optional ทั้งสอง interface จึงควร feature-detect แล้ว fallback ไป `add`:
 
 ```js
-if (typeof engine.addMany === "function") engine.addMany(docs);
-else for (const doc of docs) engine.add(doc);
+if (typeof engine.addMany === "function") await engine.addMany(docs);
+else for (const doc of docs) await engine.add(doc);
 ```
 
-มีให้ใช้บนเอนจิน FTS5 และ memory มันตัด per-document transaction overhead ออก แต่บนชุดข้อมูลขนาดใหญ่ส่วนนั้นไม่ใช่คอขวด: เอกสาร seeded 20,000 ฉบับ index ได้ ≈ 73 docs/s แบบต่อเอกสาร เทียบกับ ≈ 77 docs/s แบบรวมชุด (1.05×) บนเครื่องนี้ — รับไว้ตอน index ถี่ ๆ ได้ แต่อย่าคาดหวังความเร็วระดับเท่าตัว (ดูหัวข้อ Benchmarks ด้านล่าง)
+- **`fts5` / `memory` (sync)** — transaction เดียวของ SQLite (fts5) หรือ snapshot rollback (memory): ถ้าเอกสารตัวใด throw กลางชุด ทั้งชุดจะถูกย้อนกลับ ดัชนีจึงคงสภาพเดิมทุกไบต์ รองรับ `Iterable` ทุกแบบ (fts5 บริโภคแบบ lazy; memory materialize ทั้งชุดแบบ eager เพื่อกู้ snapshot)
+- **`meilisearch` / `elasticsearch` (async)** — รองรับ `Iterable | AsyncIterable`; ชุดว่างจะ **ไม่** ยิง HTTP request เลย Meilisearch ส่ง `POST /indexes/{index}/documents` ครั้งเดียว โดย body เป็น JSON array ของเอกสารทั้งสอง channel ต่อหนึ่งเอกสาร — Meilisearch ประมวลผลคำขอ documents แบบ atomic ชุดจึงลงทั้งหมดหรือไม่ลงเลย Elasticsearch ส่ง `POST /_bulk` แบบ NDJSON ครั้งเดียว และคำขอนี้ **ไม่ atomic**: รายการที่สำเร็จจะถูก index ไว้ และฟังก์ชันจะ throw `Error` พร้อมระบุ id ที่ล้มเหลว การเล่นซ้ำทั้งชุดปลอดภัยเพราะ id ชัดเจน จึง index ซ้ำได้แบบ idempotent
+
+การ index แบบชุดตัด overhead ของ transaction ต่อเอกสารออก แต่บนคลังขนาดใหญ่ส่วนนั้นไม่ใช่คอขวด: เอกสาร seeded 20,000 ฉบับ index ได้ ≈ 73 docs/s แบบต่อฉบับ เทียบกับ ≈ 77 docs/s แบบรวมชุด (1.05×) บนเครื่องนี้ — เก็บกำไรบน hot path แต่อย่าคาดว่าจะเร็วขึ้นหลายเท่า (ดู [Benchmarks](#benchmarks))
+
+#### `searchWithMeta()` — สัญญาณการตัดคำค้น
+
+`searchWithMeta(query, opts?)` คืน `{ hits, truncated }` — hit ชุดเดียวกับที่ `search()` จะคืน บวกธงระดับคำค้น เป็นวิธีเดียวที่จะแยก **คำค้นที่ถูกตัดแล้วไม่เจออะไรเลย** (`{ hits: [], truncated: true }`) ออกจากผลลัพธ์ว่างจริง ๆ เช่นเดียวกับ `addMany` เมธอดนี้เป็น optional จึงควร feature-detect:
+
+```js
+const { hits, truncated } = typeof engine.searchWithMeta === "function"
+  ? await engine.searchWithMeta(query)
+  : { hits: await engine.search(query), truncated: false };
+```
+
+hit ยังพก `meta` แบบมี type — `ThaiSearchMeta`: `method` (`"fts5"`, `"memory"`, `"like_fallback"`, ชื่อ adapter, …), `channel` (`"strict" | "loose"`) และ `truncated?: true` (ไม่ส่งฟิลด์นี้เมื่อ false) บวกคีย์เฉพาะของ adapter
 
 ### FTS5 — `thai-fts/fts5`
 
@@ -227,7 +244,29 @@ engine.search("ติดตั้ง โปรแกรม", { allTerms: true })
 
 การปิดตัวเลือกนี้คงผลลัพธ์ OR-join ให้ตรงกับค่าเริ่มต้นแบบ byte-for-byte และคำค้นที่มี chunk เดียวก็เหมือนกันด้วย (ไม่ใส่กลุ่มเกินจำเป็น) จะตั้งเป็นรายครั้งตามตัวอย่างข้างบน หรือตั้งเป็นค่า default ของเอนจินก็ได้ (`createFts5Engine({ allTerms: true })`)
 
-**การตัดคำค้นที่เกินจำนวน chunk** — คำค้นจะถูกใช้เพียง 8 chunk แรก (ขีดจำกัดที่ export เป็น `MAX_QUERY_CHUNKS`) ส่วนที่เหลือจะถูกตัดออกจากทุก expression เมื่อเกิดกรณีนี้ hit จะแนบ `meta.truncated: true` มาด้วย (ไม่แสดงเมื่อเป็น false) เพื่อให้คำค้นที่ถูกแคบลงไม่อ่านดูเหมือนครอบคลุมครบถ้วน
+**การตัดคำค้นที่เกินจำนวน chunk** — คำค้นจะถูกใช้เพียง 8 chunk แรก (ขีดจำกัดที่ export เป็น `MAX_QUERY_CHUNKS`) ส่วนที่เหลือจะถูกตัดออกจากทุก expression เมื่อเกิดกรณีนี้ hit จะแนบ `meta.truncated: true` มาด้วย (ไม่แสดงเมื่อเป็น false) เพื่อให้คำค้นที่ถูกแคบลงไม่อ่านดูเหมือนครอบคลุมครบถ้วน ใช้ `searchWithMeta()` เมื่อต้องการสัญญาณนี้แม้ผลลัพธ์จะเป็นศูนย์
+
+### Sync and async engines
+
+registry เก็บเอนจินสองชนิด และชนิดผูกกับการลงทะเบียน ไม่ใช่กับชื่อ:
+
+```js
+import { createEngine, createAsyncEngine, isAsyncEngine, listAsyncEngines } from "thai-fts";
+
+createEngine("fts5", { memory: true });        // sync: fts5, memory
+createEngine("memory");
+createAsyncEngine("meilisearch", { endpoint, index }); // async: meilisearch, elasticsearch
+createAsyncEngine("elasticsearch", { endpoint, index });
+
+listAsyncEngines();                            // ["elasticsearch", "meilisearch"]
+```
+
+- `createEngine(name)` สร้าง **sync** `ThaiSearchEngine` (`add`/`remove`/`search` คืนค่าตรง ๆ) ชื่อที่ลงทะเบียนแบบ sync: `fts5`, `memory`
+- `createAsyncEngine(name)` สร้าง **`ThaiAsyncEngine`** ที่ `add`/`remove`/`search` คืน Promise (`close()` ยังเป็น sync) ชื่อที่ลงทะเบียนแบบ async: `meilisearch`, `elasticsearch`
+- `isAsyncEngine(engine)` เป็นตัวแยกระดับรันไทม์สำหรับโค้ดที่รับได้ทั้งสองชนิด (เช่น service ที่อาจถือดัชนี local หรือ remote) โดยไม่เรียก `add` จึงไม่มีทางแก้ไขดัชนี
+- การเรียก creator ผิดชนิดถือเป็น error ไม่ใช่เอนจินที่ใช้งานได้ครึ่งเดียว: `createEngine("meilisearch")` จะ throw พร้อมข้อความที่ระบุ `createAsyncEngine` (และ `createAsyncEngine("fts5")` ระบุ `createEngine`)
+
+ทั้งสองชนิดรองรับเมธอด optional `addMany()` และ `searchWithMeta()` ที่อธิบายไว้ข้างบน ฝั่ง async รับ `AsyncIterable` ได้เพิ่มด้วย
 
 ## นโยบายวรรณยุกต์
 
@@ -287,7 +326,7 @@ registerThaiDictionary({ id: "legal-app", words });
 `ThaiSearchEngine` คือคอนแทรกต์แบบ pluggable ขั้นต่ำ และทะเบียนคือช่องต่อสำหรับแบ็กเอนด์ สิ่งที่มีอยู่ในปัจจุบัน:
 
 - **`fts5`** และ **`memory`** — เอนจิน LOCAL ที่ทดสอบครบทั้งชุด: FTS5 reference adapter บน `node:sqlite` และ `ThaiSearchEngine` แบบ in-memory ที่ไม่มี dependencies เลย (สำหรับเทสต์/ออฟไลน์/ข้อมูลเล็ก) API แบบ synchronous รองรับ offsets ที่ตรวจสอบได้ และฟีเจอร์ opt-in ครบชุด
-- **`meilisearch`** และ **`elasticsearch`** — อะแดปเตอร์ HTTP แบบ reference ขั้นต่ำ: ใช้ fetch ของ Node (≥ 18, ไม่ต้องใช้ SDK) `add`/`remove`/`search` เป็น **async** (`HttpSearchEngine`; `close()` ยังเป็น sync) ใช้แค่ header `apiKey` แบบ static (Meilisearch `Authorization: Bearer <key>`, Elasticsearch `Authorization: Basic base64(apiKey)`) ช่อง strict+loose สองช่องถูกเก็บไว้ฝั่งเซิร์ฟเวอร์ (เอกสารสองชิ้น / field token สอง field) และมารวม strict-then-loose ฝั่งไคลเอนต์ **offsets ไม่รองรับ** (ไม่มี `quote`/`start`/`end` ที่ตรวจสอบแล้ว) และ hit ไม่มี snippet ควรใช้ในฐานะจุดเริ่มต้นที่ "ทำงานกับเซิร์ฟเวอร์จริงได้" ไม่ใช่การอินทิเกรตที่ปรับแต่งแล้ว
+- **`meilisearch`** และ **`elasticsearch`** — อะแดปเตอร์ HTTP แบบ reference ขั้นต่ำ: ใช้ fetch ของ Node (≥ 18, ไม่ต้องใช้ SDK) `add`/`remove`/`search` เป็น **async** (`ThaiAsyncEngine` (alias `HttpSearchEngine`); `close()` ยังเป็น sync) ใช้แค่ header `apiKey` แบบ static (Meilisearch `Authorization: Bearer <key>`, Elasticsearch `Authorization: Basic base64(apiKey)`) ช่อง strict+loose สองช่องถูกเก็บไว้ฝั่งเซิร์ฟเวอร์ (เอกสารสองชิ้น / field token สอง field) และมารวม strict-then-loose ฝั่งไคลเอนต์ **offsets ไม่รองรับ** (ไม่มี `quote`/`start`/`end` ที่ตรวจสอบแล้ว) และ hit ไม่มี snippet ควรใช้ในฐานะจุดเริ่มต้นที่ "ทำงานกับเซิร์ฟเวอร์จริงได้" ไม่ใช่การอินทิเกรตที่ปรับแต่งแล้ว
 
 ```js
 import { createMeilisearchEngine, createElasticsearchEngine } from "thai-fts";
@@ -361,7 +400,7 @@ quick mode ให้ตัวเลขเทียบกัน: ตัดคำ 
 | thai-fts — dictionary + syllable fallback | ≈ 1.82 | zero-dependency |
 | Charabia (WASM) | ≈ 22 | WASM payload |
 
-ตัวเลขแถวของ thai-fts ในตารางนี้มาจากการวัดคนละครั้งกับตัวอย่าง `run.mjs` ข้างบน (≈ 4.26 / 3.03 MiB/s บนเครื่องนี้) — ชุดข้อมูลและเครื่องต่างกัน แต่ทั้งสองครั้งเรียงลำดับเหมือนกัน ส่วนตัวเลข ≈ 22 MiB/s ของ Charabia เป็นค่าที่เผยแพร่จากภายนอก
+ที่มาของตัวเลข: แถว wordcut ≈ 0.32 MiB/s มาจากเซสชันเทียบ segmenter ที่ใช้รูปแบบ harness ของ `benchmark/run.mjs` ในรีโปนี้ ไฟล์ผลลัพธ์ดิบอยู่ใต้ `benchmark/results/` (`npm run benchmark` สร้างใหม่เฉพาะเส้นทางของ thai-fts) แถวของ thai-fts มาจากการวัดคนละครั้งกับตัวอย่าง `run.mjs` ข้างบน (≈ 4.26 / 3.03 MiB/s บนเครื่องนี้) — ชุดข้อมูลและฮาร์ดแวร์ต่างกัน และทั้งสองตัวอย่างยังคงลำดับเดิม ตัวเลขของ Charabia เผยแพร่จากภายนอก (เส้นทาง WASM ประมาณ 22 MiB/s สำหรับการตัดคำไทย)
 
 สรุปคือ thai-fts **ไม่ใช่** segmenter ไทยที่เร็วที่สุด — เส้นทาง WASM ของ Charabia ชนะเรื่องการตัดคำชัดเจน สิ่งที่ได้แลกคือของทั้งกล่องที่เหลือ: เร็วพอสำหรับการ index ข้อความเต็ม, ไม่มี dependencies ตอนรันไทม์ (ไม่มี WASM ไม่มี native binding) และมี full-text search พร้อมการจัดอันดับ BM25 รวมทั้ง dual-channel strict/loose ที่คำนึงวรรณยุกต์อยู่ในแพ็กเกจเดียว — ไม่มีเครื่องมือไหนในตารางที่ให้ครบชุดนี้ในตัวเอง
 

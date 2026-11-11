@@ -58,10 +58,10 @@ import {
 } from "../_align.js";
 import {
   registerEngine,
-  type ThaiEngineFactory,
   type ThaiEngineOptions,
   type ThaiSearchDoc,
   type ThaiSearchEngine,
+  type ThaiSearchOutcome,
   type ThaiSearchResult,
 } from "../engine.js";
 
@@ -316,11 +316,17 @@ export function createMemoryEngine(opts: MemoryEngineOptions = {}): MemorySearch
     docs.delete(String(id));
   };
 
-  const search = (query: string, rawOpts?: ThaiEngineOptions): ThaiSearchResult[] => {
+  /** Search and return BOTH the hits and the query-level truncation flag (see
+   * `ThaiSearchOutcome`): `truncated` is derived from the shared chunk plan, so
+   * a query cut past the 8-chunk cap reports it even when nothing matched. */
+  const searchOutcome = (
+    query: string,
+    rawOpts?: ThaiEngineOptions
+  ): ThaiSearchOutcome => {
     assertOpen();
     const s: MemorySearchOptions = rawOpts ?? {};
     const trimmed = String(query ?? "").trim();
-    if (!trimmed) return [];
+    if (!trimmed) return { hits: [], truncated: false };
 
     const limit = clampLimit(s.limit ?? base.limit);
     const tone = resolveToneMode(s.tone ?? base.tone);
@@ -464,8 +470,11 @@ export function createMemoryEngine(opts: MemoryEngineOptions = {}): MemorySearch
         }
       }
     }
-    return results;
+    return { hits: results, truncated };
   };
+
+  const search = (query: string, rawOpts?: ThaiEngineOptions): ThaiSearchResult[] =>
+    searchOutcome(query, rawOpts).hits;
 
   const engine: MemorySearchEngine = {
     type: "memory",
@@ -475,6 +484,12 @@ export function createMemoryEngine(opts: MemoryEngineOptions = {}): MemorySearch
     },
     addMany(batch: Iterable<ThaiSearchDoc>): void {
       assertOpen();
+      // NOTE: unlike the fts5 store's lazy + transactional path, this adapter
+      // materializes the whole batch EAGERLY (`[...batch]`) so the pre-batch
+      // snapshot below describes exactly the ids the batch will touch. A
+      // side effect is that a generator which throws mid-iteration aborts
+      // before any mutation, so nothing needs rolling back; a very large batch
+      // must therefore fit in memory here.
       const incoming = [...batch];
       if (incoming.length === 0) return;
       // Rollback state captured BEFORE the first mutation: the prior record of
@@ -515,6 +530,7 @@ export function createMemoryEngine(opts: MemoryEngineOptions = {}): MemorySearch
       engine.add(doc);
     },
     search,
+    searchWithMeta: searchOutcome,
     close(): void {
       if (closed) return;
       closed = true;
@@ -526,4 +542,4 @@ export function createMemoryEngine(opts: MemoryEngineOptions = {}): MemorySearch
 
 // Pre-register the adapter under its name so `createEngine("memory")` works
 // out of the box, alongside any other engines registered by the app.
-registerEngine("memory", createMemoryEngine as unknown as ThaiEngineFactory);
+registerEngine("memory", createMemoryEngine);

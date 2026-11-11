@@ -186,30 +186,65 @@ PyThaiNLP integration: `node examples/segmenter-bridge.mjs`.
 
 ### Engine — `thai-fts/engine`
 
-- `ThaiSearchEngine` — `{ add(doc), remove(id), search(query, opts?), close() }`; bulk `addMany(docs)` is optional on the interface (see below)
-- `ThaiSearchDoc`, `ThaiSearchResult`, `ThaiEngineOptions`, `ThaiEngineFactory`
-- `registerEngine(name, factory)`, `createEngine(name, opts?)`, `listEngines()`, `unregisterAllEngines()`
+- `ThaiSearchEngine` — `{ add(doc), remove(id), search(query, opts?), close() }`; bulk `addMany(docs)` and `searchWithMeta(query, opts?)` are optional on the interface (see below)
+- `ThaiAsyncEngine` — the async twin (`add`/`remove`/`search` return Promises, `close()` stays sync) implemented by the HTTP adapters
+- `ThaiSearchDoc`, `ThaiSearchResult`, `ThaiSearchMeta`, `ThaiSearchOutcome`, `ThaiEngineOptions`, `ThaiEngineFactory`, `ThaiAsyncEngineFactory`
+- `registerEngine(name, factory)`, `createEngine(name, opts?)`, `listEngines()`, `unregisterAllEngines()` — sync registry
+- `registerAsyncEngine(name, factory)`, `createAsyncEngine(name, opts?)`, `listAsyncEngines()`, `isAsyncEngine(engine)` — async registry (see [Sync and async engines](#sync-and-async-engines))
 - `createMemoryEngine(opts?)` → zero-dependency in-memory `ThaiSearchEngine` (tests / offline / small data), registered as `"memory"`
-- `createMeilisearchEngine({ endpoint, index, apiKey?, ... })`, `createElasticsearchEngine({ endpoint, index, apiKey?, ... })` → minimal REFERENCE HTTP adapters (async `add`/`remove`/`search` — see `HttpSearchEngine`), registered as `"meilisearch"` / `"elasticsearch"`
-- `HttpSearchEngine` — the async engine contract the HTTP adapters implement (`close()` stays sync)
+- `createMeilisearchEngine({ endpoint, index, apiKey?, ... })`, `createElasticsearchEngine({ endpoint, index, apiKey?, ... })` → minimal REFERENCE HTTP adapters (async `add`/`remove`/`search` — see `ThaiAsyncEngine`), registered as `"meilisearch"` / `"elasticsearch"` via `registerAsyncEngine`
+- `HttpSearchEngine` — alias of `ThaiAsyncEngine`, kept for existing imports
 
 #### Bulk indexing — `addMany()` (optional)
 
-`addMany(docs)` indexes an iterable in **one transaction**, all-or-nothing: if a
-document throws mid-batch the whole batch rolls back, so a failed load leaves the
-index exactly as it was. It is optional on `ThaiSearchEngine` (the reference HTTP
-adapters don't implement it), so feature-detect and fall back to `add`:
+`addMany(docs)` indexes many documents in **one backend request or one
+transaction**, all-or-nothing wherever the backend can provide it. It exists on
+BOTH engine kinds and is optional on both interfaces, so feature-detect it and
+fall back to `add`:
 
 ```js
-if (typeof engine.addMany === "function") engine.addMany(docs);
-else for (const doc of docs) engine.add(doc);
+if (typeof engine.addMany === "function") await engine.addMany(docs);
+else for (const doc of docs) await engine.add(doc);
 ```
 
-Available on the FTS5 and memory engines. It removes per-document transaction
-overhead, but on large corpora that is not the bottleneck: 20,000 seeded
-documents index at ≈ 73 docs/s per-doc vs ≈ 77 docs/s batched (1.05×) on this
-machine — take the win on hot paths, don't expect an order of magnitude (see
+- **`fts5` / `memory` (sync)** — one SQLite transaction (fts5) or a snapshot
+  rollback (memory): if a document throws mid-batch the whole batch rolls back,
+  so a failed load leaves the index exactly as it was. Takes any `Iterable`
+  (fts5 consumes it lazily; memory materializes the batch eagerly so it can
+  restore the snapshot).
+- **`meilisearch` / `elasticsearch` (async)** — accepts `Iterable |
+  AsyncIterable`; an empty batch sends **no** HTTP request. Meilisearch sends
+  ONE `POST /indexes/{index}/documents` whose body is the JSON array of both
+  tone-channel docs per logical document — Meilisearch applies a documents
+  request atomically, so the batch lands whole or not at all. Elasticsearch
+  sends ONE `POST /_bulk` NDJSON request, and that request is **NOT atomic**:
+  successful items stay indexed, and the call throws an `Error` listing the
+  failed ids. Replaying the batch is safe — ids are explicit, so re-indexing is
+  idempotent.
+
+Bulk indexing removes per-document transaction overhead, but on large corpora
+that is not the bottleneck: 20,000 seeded documents index at ≈ 73 docs/s
+per-doc vs ≈ 77 docs/s batched (1.05×) on this machine — take the win on hot
+paths, don't expect an order of magnitude (see
 [Benchmarks](#benchmarks)).
+
+#### `searchWithMeta()` — the truncation signal
+
+`searchWithMeta(query, opts?)` returns `{ hits, truncated }` — the same hits
+`search()` would return plus a query-level flag. It is the only way to tell a
+**capped query that matched nothing** (`{ hits: [], truncated: true }`) from a
+genuinely empty result set. Like `addMany`, it is optional, so feature-detect:
+
+```js
+const { hits, truncated } = typeof engine.searchWithMeta === "function"
+  ? await engine.searchWithMeta(query)
+  : { hits: await engine.search(query), truncated: false };
+```
+
+Hits also carry a typed `meta` object — `ThaiSearchMeta`:
+`method` (`"fts5"`, `"memory"`, `"like_fallback"`, adapter name, …),
+`channel` (`"strict" | "loose"`), and `truncated?: true` (omitted when false),
+plus any adapter-specific keys.
 
 ### FTS5 — `thai-fts/fts5`
 
@@ -293,7 +328,39 @@ an engine default (`createFts5Engine({ allTerms: true })`).
 **Query truncation** — only the first 8 chunks of a query are used (the exported
 `MAX_QUERY_CHUNKS` cap); the rest are dropped from every expression. When that
 happens the hits carry `meta.truncated: true` (omitted when false), so a narrowed
-query never reads as if it were complete.
+query never reads as if it were complete. Use `searchWithMeta()` when you need
+that signal even with zero hits.
+
+### Sync and async engines
+
+The registry holds two kinds of engine, and the kind belongs to the
+registration, not to the name:
+
+```js
+import { createEngine, createAsyncEngine, isAsyncEngine, listAsyncEngines } from "thai-fts";
+
+createEngine("fts5", { memory: true });        // sync: fts5, memory
+createEngine("memory");
+createAsyncEngine("meilisearch", { endpoint, index }); // async: meilisearch, elasticsearch
+createAsyncEngine("elasticsearch", { endpoint, index });
+
+listAsyncEngines();                            // ["elasticsearch", "meilisearch"]
+```
+
+- `createEngine(name)` builds a **sync** `ThaiSearchEngine` (`add`/`remove`/
+  `search` return values directly). Registered sync names: `fts5`, `memory`.
+- `createAsyncEngine(name)` builds a **`ThaiAsyncEngine`** whose `add`/`remove`/
+  `search` return Promises (`close()` stays sync). Registered async names:
+  `meilisearch`, `elasticsearch`.
+- `isAsyncEngine(engine)` is the runtime discriminator for code that accepts
+  either kind (e.g. a service that may hold a local or a remote index). It
+  never calls `add`, so it cannot mutate an index.
+- Calling the wrong creator is an error, not a half-usable engine:
+  `createEngine("meilisearch")` throws a message naming
+  `createAsyncEngine` (and `createAsyncEngine("fts5")` names `createEngine`).
+
+Both kinds support the optional `addMany()` and `searchWithMeta()` methods
+described above; the async half additionally accepts an `AsyncIterable`.
 
 ## Tone policy
 
@@ -382,7 +449,8 @@ for backends. Shipped today:
   offsets, full opt-in feature set.
 - **`meilisearch`** and **`elasticsearch`** — minimal REFERENCE HTTP adapters:
   fetch-based (Node 18+, no SDK), **async** `add`/`remove`/`search`
-  (`HttpSearchEngine`; `close()` stays sync), one static `apiKey` header
+  (`ThaiAsyncEngine`, exported alias `HttpSearchEngine`; `close()` stays sync),
+  one static `apiKey` header
   (Meilisearch `Authorization: Bearer <key>`, Elasticsearch
   `Authorization: Basic base64(apiKey)`). The strict+loose two-channel is
   preserved SERVER-SIDE (two documents / two token fields) and merged
@@ -481,10 +549,14 @@ sessions, and **no ranking-quality claim** is made against any other tool.
 | thai-fts — dictionary + syllable fallback | ≈ 1.82 | zero-dependency |
 | Charabia (WASM) | ≈ 22 | WASM payload |
 
-The thai-fts rows come from a separate measurement session and differ slightly
-from the `run.mjs` samples quoted above (≈ 4.26 / 3.03 MiB/s on this machine) —
-corpora and hardware differ, and both samples keep the same ordering. Charabia's
-figure is published externally.
+Source pointer: the wordcut ≈ 0.32 MiB/s row comes from a segmenter-comparison
+session that used this repo's `benchmark/run.mjs` harness shape; raw result
+files live under `benchmark/results/` (`npm run benchmark` regenerates only the
+thai-fts paths). The thai-fts rows come from a separate measurement session and
+differ slightly from the `run.mjs` samples quoted above (≈ 4.26 / 3.03 MiB/s on
+this machine) — corpora and hardware differ, and both samples keep the same
+ordering. Charabia's figure is published externally (WASM path, ~22 MiB/s for
+Thai segmentation).
 
 So thai-fts is **not** the fastest Thai segmenter — Charabia's WASM path clearly
 wins raw segmentation. The trade is everything else in the box: fast enough for

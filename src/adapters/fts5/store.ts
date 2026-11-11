@@ -89,7 +89,9 @@ export interface Fts5Store {
   /** Index a batch of documents in ONE transaction — equivalent to `add` for
    * each entry, but either the whole batch lands or none of it does (a failure
    * part-way rolls back every insert, including replacements of existing ids).
-   * An empty iterable is a no-op. */
+   * An empty iterable is a no-op. The iterable is consumed LAZILY inside the
+   * transaction (no eager `[...batch]` materialization), so a generator of many
+   * documents never has to fit in memory at once. */
   addMany(docs: Iterable<ThaiSearchDoc>): void;
   /** Drop the document (and its FTS rows) by id. No-op when absent. */
   remove(id: string | number): void;
@@ -226,6 +228,16 @@ export function openFts5Store(opts: OpenFts5StoreOptions = {}): Fts5Store {
   const allRaws = (): DocRowRecord[] =>
     selAll.all() as unknown as DocRowRecord[];
 
+  // A failing ROLLBACK must never replace the error that caused the rollback:
+  // the caller needs the original insert/batch failure, not the cleanup one.
+  const rollbackQuietly = (): void => {
+    try {
+      db.exec("ROLLBACK");
+    } catch {
+      // Swallowed on purpose — the original error is rethrown by the caller.
+    }
+  };
+
   const store: Fts5Store = {
     type: "fts5",
     db,
@@ -238,7 +250,7 @@ export function openFts5Store(opts: OpenFts5StoreOptions = {}): Fts5Store {
         insert(doc);
         db.exec("COMMIT");
       } catch (e) {
-        db.exec("ROLLBACK");
+        rollbackQuietly();
         throw e;
       }
     },
@@ -258,14 +270,14 @@ export function openFts5Store(opts: OpenFts5StoreOptions = {}): Fts5Store {
           insert(doc);
         }
       } catch (e) {
-        if (open) db.exec("ROLLBACK");
+        if (open) rollbackQuietly();
         throw e;
       }
       if (!open) return;
       try {
         db.exec("COMMIT");
       } catch (e) {
-        db.exec("ROLLBACK");
+        rollbackQuietly();
         throw e;
       }
     },
@@ -276,7 +288,7 @@ export function openFts5Store(opts: OpenFts5StoreOptions = {}): Fts5Store {
         removeRow(id);
         db.exec("COMMIT");
       } catch (e) {
-        db.exec("ROLLBACK");
+        rollbackQuietly();
         throw e;
       }
     },
@@ -302,7 +314,7 @@ export function openFts5Store(opts: OpenFts5StoreOptions = {}): Fts5Store {
         }
         db.exec("COMMIT");
       } catch (e) {
-        db.exec("ROLLBACK");
+        rollbackQuietly();
         throw e;
       }
     },

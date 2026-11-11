@@ -52,7 +52,7 @@
  * const hits = fts5Search(store, "ติดตัง", { limit: 10, tone: "both" });
  * ```
  */
-import { buildSearchQuery } from "../../core/query.js";
+import { buildSearchQuery, planQueryChunks } from "../../core/query.js";
 import { looseForm } from "../../core/segment.js";
 import { resolveToneMode } from "../../core/tone.js";
 import type { ToneMode } from "../../core/types.js";
@@ -63,7 +63,12 @@ import {
   MAX_OFFSET_OCCURRENCES,
   regionToRawOffsets,
 } from "../_align.js";
-import type { ThaiEngineOptions, ThaiSearchResult } from "../engine.js";
+import type {
+  ThaiEngineOptions,
+  ThaiSearchMeta,
+  ThaiSearchOutcome,
+  ThaiSearchResult,
+} from "../engine.js";
 import type { Fts5Store } from "./store.js";
 
 /** A candidate row handed to the caller-owned `filter` hook. */
@@ -133,7 +138,7 @@ function toResult(
   row: ChannelRow,
   needles: readonly string[],
   rank: number,
-  meta: Record<string, unknown>
+  meta: ThaiSearchMeta & Record<string, unknown>
 ): ThaiSearchResult {
   return {
     id: decodeId(row),
@@ -149,8 +154,23 @@ export function fts5Search(
   query: string,
   opts: Fts5SearchOptions = {}
 ): ThaiSearchResult[] {
+  return fts5SearchWithMeta(store, query, opts).hits;
+}
+
+/**
+ * Same search as `fts5Search`, wrapped in a `ThaiSearchOutcome` so the
+ * query-level `truncated` flag is observable even when the built query matched
+ * nothing (`{ hits: [], truncated: true }`). `truncated` is derived once from
+ * the shared chunk plan, so the LIKE fallback path reports it identically.
+ */
+export function fts5SearchWithMeta(
+  store: Fts5Store,
+  query: string,
+  opts: Fts5SearchOptions = {}
+): ThaiSearchOutcome {
   const trimmed = String(query ?? "").trim();
-  if (!trimmed) return [];
+  if (!trimmed) return { hits: [], truncated: false };
+  const truncated = planQueryChunks(trimmed).truncated;
 
   const limit = clampLimit(opts.limit);
   const tone: ToneMode = resolveToneMode(opts);
@@ -166,7 +186,10 @@ export function fts5Search(
   const thaiChars = countThaiChars(trimmed);
   const onlyThai = /^[\u0E00-\u0E7F\s]+$/.test(trimmed);
   if (onlyThai && thaiChars > 0 && thaiChars <= 2) {
-    return likeFallback(store, trimmed, tone, limit, opts.filter);
+    return {
+      hits: likeFallback(store, trimmed, tone, limit, opts.filter),
+      truncated,
+    };
   }
 
   // Query-side stopword + stem symmetry: ALWAYS thread the store's resolved
@@ -188,7 +211,7 @@ export function fts5Search(
   // shadow table is the source of RAW text; the fts tables hold segmented).
   const rawByKey = new Map<string, { title: string; body: string }>();
 
-  const pushResult = (row: ChannelRow, channel: string): void => {
+  const pushResult = (row: ChannelRow, channel: "strict" | "loose"): void => {
     if (results.length >= limit) return;
     const key = String(row.id);
     rawByKey.set(key, { title: row.title, body: row.body });
@@ -202,15 +225,22 @@ export function fts5Search(
       if (!opts.filter(candidate)) return;
     }
     seen.add(key);
-    const meta: Record<string, unknown> = { method: "fts5", channel };
+    const meta: ThaiSearchMeta & Record<string, unknown> = {
+      method: "fts5",
+      channel,
+    };
     // Only ever set when the query really was cut down — leaving it absent
     // keeps the default hit shape byte-for-byte what it was before.
-    if (built.truncated) meta.truncated = true;
+    if (truncated) meta.truncated = true;
     results.push(toResult(row, needles, results.length + 1, meta));
   };
 
   // Default (unweighted) path: a single `ORDER BY rank` scan per channel.
-  const runChannel = (table: string, match: string, channel: string): void => {
+  const runChannel = (
+    table: string,
+    match: string,
+    channel: "strict" | "loose"
+  ): void => {
     const remaining = limit - results.length;
     if (remaining <= 0) return;
     const params: Array<string | number> = [match];
@@ -236,7 +266,7 @@ export function fts5Search(
   const runWeightedChannel = (
     table: string,
     match: string,
-    channel: string,
+    channel: "strict" | "loose",
     weight: number
   ): void => {
     if (results.length >= limit) return;
@@ -282,7 +312,7 @@ export function fts5Search(
   const channelRunner: (
     table: string,
     match: string,
-    channel: string
+    channel: "strict" | "loose"
   ) => void =
     weighted === undefined
       ? runChannel
@@ -327,7 +357,7 @@ export function fts5Search(
       }
     }
   }
-  return results;
+  return { hits: results, truncated };
 }
 
 /** LIKE fallback for short pure-Thai queries. Tone-aware: exact scan first,
