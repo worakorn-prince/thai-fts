@@ -4,6 +4,9 @@ node_modules/
 # build output
 dist/
 
+# benchmark output (local only)
+benchmark/results/
+
 # runtime / orchestration (local only — manager state, checkpoints, queue)
 .agent/
 *.log

@@ -1,5 +1,9 @@
 # thai-fts
 
+[![CI](https://img.shields.io/github/actions/workflow/status/worakorn-prince/thai-fts/ci.yml?branch=master&label=CI)](https://github.com/worakorn-prince/thai-fts/actions/workflows/ci.yml)
+[![License: MIT](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
+[![Node](https://img.shields.io/badge/node-%E2%89%A5%2022.13-brightgreen)](package.json)
+
 **Tone-aware Thai full-text search for Node.js — zero runtime dependencies.**
 
 `thai-fts` solves two problems that trip up generic search stacks on Thai:
@@ -379,6 +383,49 @@ npm test           # build + node --test (docs + CLI + core + FTS5)
 npm run pack:check # npm pack --dry-run (only dist + docs + READMEs ship)
 npx tsc --noEmit   # typecheck
 ```
+
+## Benchmarks
+
+```sh
+npm run benchmark        # full suite — segmentation, indexing, search latency (~40 s)
+npm run benchmark:quick  # fast subset — same shapes, smaller corpus / fewer iterations (~3 s)
+```
+
+Measured results are written to `benchmark/results/`. Numbers move with the
+machine (CPU, storage, OS), so read them as **relative** signals — compare run
+against run on the same machine — rather than as a guaranteed floor.
+
+Single-machine sample (Node 26, one dev laptop, seeded corpus — a sample, not a
+fleet average). Full mode segments a 2.41 MiB corpus and indexes 3,000 documents
+of ≈ 840 bytes each, with 250 search samples; quick mode shrinks that to
+0.39 MiB / 500 documents.
+
+| Metric (full mode) | Measured | Notes |
+| --- | --- | --- |
+| Segmentation, `Intl.Segmenter` | ≈ 4.26 MiB/s (235 ms) | full-ICU word boundaries |
+| Segmentation, dictionary + syllable fallback | ≈ 3.03 MiB/s (329.8 ms) | slightly **slower** on this corpus |
+| Indexing, bulk `rebuild()` | ≈ 210 docs/s | dominated by SQLite FTS5 inserts |
+| Indexing, per-doc `add()` | ≈ 309 docs/s | same bottleneck, plus per-call overhead |
+| Search, `strict` | p50 3.39 / p95 7.53 ms | |
+| Search, `loose` | p50 3.07 / p95 6.76 ms | |
+| Search, `prefix` | p50 3.35 / p95 7.47 ms | |
+| Search, `like_fallback` | p50 1.36 / p95 2.06 ms | cheapest path |
+
+Quick mode, for comparison: segmentation 4.29 vs 3.41 MiB/s, indexing
+1112 (`rebuild`) / 787 (`add`) docs/s, and search p50/p95 of 1.72/4.19 (strict),
+2.18/3.32 (loose), 1.99/4.41 (prefix), 1.45/2.30 ms (`like_fallback`).
+
+Two caveats worth stating plainly:
+
+- **Indexing is not Thai-tokenization-bound.** It is bounded by SQLite FTS5
+  inserts, so throughput tracks document size — docs/s scales *down* as documents
+  get bigger, and quick mode's higher numbers reflect smaller/fewer documents,
+  not a faster tokenizer.
+- **Segmentation throughput is not a leaderboard entry.** We measured ≈ 4.3 MiB/s
+  on this machine; Charabia publishes ~22 MiB/s for Thai segmentation as an
+  external reference point. Different corpora and machines — and the figures here
+  cover throughput and latency only: `thai-fts` makes **no ranking-quality claim**
+  against any other Thai segmenter or search stack.
 
 ## License
 

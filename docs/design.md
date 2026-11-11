@@ -212,3 +212,41 @@ keyword-delimited and may be chained in one invocation; FTS5 commands share a
 and search see the same in-memory database within one process. `index` is
 silent on success (exit 0) and returns the stored id via `--json`; `search`
 prints `id<TAB>rank` (+ `TAB snippet`) per hit and nothing at all on no hits.
+
+## 11. CI & benchmarks
+
+**CI** lives in `.github/workflows/ci.yml` (workflow name `CI`). It triggers on
+`push` to every branch and on `pull_request` targeting `master`, with
+`fail-fast: false` and a per-job `timeout-minutes: 15`. One job, `build`, runs on
+`ubuntu-latest` across a Node matrix of `22.x`, `24.x`, `26.x`: checkout →
+`setup-node` with `cache: npm` → `npm ci --no-audit --no-fund` → `npm run build`
+→ `npm test` → `npx tsc --noEmit` → `npm pack --dry-run`. The workflow needs no
+secrets and publishes nothing; the README badges point at this file's status on
+`master`.
+
+**Benchmarks** (`benchmark/run.mjs`, driven by `npm run benchmark` ≈ 40 s and
+`npm run benchmark:quick` ≈ 3 s) measure three things against a seeded synthetic
+corpus and write results into `benchmark/results/`:
+
+- **Segmentation throughput** in MiB/s for both paths. On the full-mode corpus
+  (2.41 MiB) `Intl.Segmenter` reaches ≈ 4.26 MiB/s while the dictionary + syllable
+  fallback lands slightly *lower* at ≈ 3.03 MiB/s — the ICU path is the faster one
+  here, so nothing may claim the fallback wins on speed. Quick mode (0.39 MiB)
+  reads 4.29 vs 3.41 MiB/s.
+- **Indexing throughput** in docs/s, reported separately for bulk `rebuild()` and
+  per-doc `add()`. Full mode (3,000 documents of ≈ 840 bytes) gives ≈ 210 and
+  ≈ 309 docs/s. This is dominated by SQLite FTS5 inserts, not Thai tokenization,
+  so docs/s scales down as documents get bigger and quick mode (500 documents)
+  reads much higher — 1112 / 787 docs/s.
+- **Search latency** percentiles per channel. Full mode, 250 samples: strict
+  p50 3.39 / p95 7.53 ms, loose 3.07 / 6.76 ms, prefix 3.35 / 7.47 ms,
+  `like_fallback` 1.36 / 2.06 ms. Quick mode: strict 1.72 / 4.19, loose
+  2.18 / 3.32, prefix 1.99 / 4.41, `like_fallback` 1.45 / 2.30 ms.
+
+Absolute numbers are machine-dependent (CPU, storage, OS); only run-to-run
+comparisons on one machine carry meaning. Charabia's published ~22 MiB/s for Thai
+segmentation is cited as an external reference point next to our measured
+~4.3 MiB/s on this machine — different corpora and hardware, and no
+ranking-quality claim is made against any other Thai segmenter or search stack.
+CI does not run benchmarks; it keeps the build/test/typecheck/pack signal fast
+and deterministic.

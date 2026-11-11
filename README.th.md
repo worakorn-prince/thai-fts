@@ -1,5 +1,9 @@
 # thai-fts
 
+[![CI](https://img.shields.io/github/actions/workflow/status/worakorn-prince/thai-fts/ci.yml?branch=master&label=CI)](https://github.com/worakorn-prince/thai-fts/actions/workflows/ci.yml)
+[![License: MIT](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
+[![Node](https://img.shields.io/badge/node-%E2%89%A5%2022.13-brightgreen)](package.json)
+
 **การค้นหาแบบข้อความเต็ม (full-text search) ภาษาไทยที่คำนึงถึงวรรณยุกต์ สำหรับ Node.js — ไม่มีการพึ่งพาไลบรารีอื่นตอนรันไทม์ (zero runtime dependencies)**
 
 `thai-fts` แก้ปัญหาสองอย่างที่เสิร์ชเอนจินทั่วไปจัดการภาษาไทยได้ไม่ดี:
@@ -293,6 +297,35 @@ npm test           # build + node --test (docs + CLI + core + FTS5)
 npm run pack:check # npm pack --dry-run (จัดส่งเฉพาะ dist + docs + READMEs)
 npx tsc --noEmit   # ตรวจชนิด
 ```
+
+## Benchmarks (เบนช์มาร์ก)
+
+```sh
+npm run benchmark        # ครบชุด — การตัดคำ, ทำดัชนี, ความหน่วงของการค้นหา (~40 s)
+npm run benchmark:quick  # แบบรวดเร็ว — รูปแบบผลลัพธ์เหมือนเดิม แต่ใช้ชุดข้อมูลและจำนวนรอบน้อยกว่า (~3 s)
+```
+
+ผลลัพทธิ์ที่วัดได้จะเขียนลงโฟลเดอร์ `benchmark/results/` ตัวเลขขึ้นอยู่กับเครื่องที่รัน (CPU, storage, OS) จึงควรอ่านเป็นค่าเปรียบเทียบรอบต่อรอบบนเครื่องเดียวกัน ไม่ใช่ตัวเลขการันตีสำหรับทุกเครื่อง
+
+ตัวอย่างตัวเลขจากเครื่องเดียว (Node 26, เครื่อง dev หนึ่งเครื่อง, seeded corpus — เป็นตัวอย่าง ไม่ใช่ค่าเฉลี่ยหลายเครื่อง): full mode ตัดคำชุดข้อมูล 2.41 MiB แล้วทำดัชนีเอกสาร 3,000 ฉบับ (~840 bytes/ฉบับ) พร้อมสุ่มค้นหา 250 ครั้ง ส่วน quick mode ย่อเหลือ 0.39 MiB / 500 เอกสาร
+
+| รายการ (full mode) | ค่าที่วัดได้ | หมายเหตุ |
+| --- | --- | --- |
+| การตัดคำ (`Intl.Segmenter`) | ≈ 4.26 MiB/s (235 ms) | ขอบเขตคำตาม full ICU |
+| การตัดคำ (พจนานุกรม + พยางค์สำรอง) | ≈ 3.03 MiB/s (329.8 ms) | บนชุดข้อมูลนี้ **ช้ากว่า** เล็กน้อย |
+| ทำดัชนี แบบ bulk `rebuild()` | ≈ 210 docs/s | ติดเพดานการแทรกของ SQLite FTS5 |
+| ทำดัชนี แบบต่อเอกสาร `add()` | ≈ 309 docs/s | คอขวดเดียวกัน บวก overhead ต่อคำสั่ง |
+| ค้นหา `strict` | p50 3.39 / p95 7.53 ms | |
+| ค้นหา `loose` | p50 3.07 / p95 6.76 ms | |
+| ค้นหา `prefix` | p50 3.35 / p95 7.47 ms | |
+| ค้นหา `like_fallback` | p50 1.36 / p95 2.06 ms | ถูกที่สุด |
+
+quick mode ให้ตัวเลขเทียบกัน: ตัดคำ 4.29 เทียบกับ 3.41 MiB/s, ทำดัชนี 1112 (`rebuild`) / 787 (`add`) docs/s, และ p50/p95 ของการค้นหา 1.72/4.19 (strict), 2.18/3.32 (loose), 1.99/4.41 (prefix), 1.45/2.30 ms (`like_fallback`)
+
+ข้อควรระวังสองข้อที่ควรบอกตรง ๆ:
+
+- **การทำดัชนีไม่ได้ติดคอขวดเรื่องการตัดคำไทย** — มันถูกจำกัดด้วยการแทรกเข้า SQLite FTS5 ดังนั้น throughput จึงแปรตามขนาดเอกสาร docs/s จะ *ลดลง* เมื่อเอกสารใหญ่ขึ้น ตัวเลขที่สูงกว่าใน quick mode เกิดจากเอกสารเล็กและน้อยกว่า ไม่ใช่เพราะ tokenizer เร็วขึ้น
+- **throughput การตัดคำไม่ใช่ตารางแข่งขัน** — เราวัดได้ ~4.3 MiB/s บนเครื่องนี้ ส่วน Charabia เผยแพร่ ~22 MiB/s ไว้เป็นจุดอ้างอิงภายนอก ซึ่งเป็นคนละชุดข้อมูลและคนละเครื่อง — ตัวเลขทั้งหมดนี้ครอบคลุมเฉพาะ throughput กับ latency เท่านั้น `thai-fts` ไม่ได้กล่าวอ้างความเหนือกว่าด้านการจัดอันดับผลลัพธ์ (ranking) เมื่อเทียบกับ segmenter หรือ search stack ไทยอื่น
 
 ## ลิขสิทธิ์
 

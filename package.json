@@ -64,6 +64,8 @@
   "scripts": {
     "build": "tsup",
     "test": "npm run build && node --test test",
+    "benchmark": "npm run build && node benchmark/run.mjs",
+    "benchmark:quick": "npm run build && node benchmark/run.mjs --quick",
     "pack:check": "npm pack --dry-run",
     "prepublishOnly": "npm run build && npm test"
   },
