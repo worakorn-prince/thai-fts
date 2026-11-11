@@ -104,6 +104,12 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `store.get()` / `store.allRows()` after `close()` now throw a clear
   `"store is closed"` error instead of leaking
   `statement has been finalized`.
+- **Loose-channel query chain order** — `buildLooseFtsMatch` applied
+  `looseForm()` to a whole chunk *before* segmenting it, while loose index rows
+  store `looseForm(segment(payload))` per token; an unspaced Thai query such as
+  `ป้าไป` could therefore return zero loose hits while strict matched. The
+  query side now segments the raw chunk first and de-accentuates each token,
+  mirroring the index-side chain; `buildFtsMatch` (strict) is unchanged.
 
 ## [0.1.0] — 2026-11-11
 

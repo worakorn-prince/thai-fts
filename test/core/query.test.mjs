@@ -11,6 +11,8 @@ const {
   planQueryChunks,
   quoteFtsToken,
   hasThai,
+  openFts5Store,
+  fts5Search,
 } = await import("../../dist/index.js");
 
 const skip = typeof Intl.Segmenter !== "function";
@@ -204,4 +206,26 @@ test("planQueryChunks: empty and whitespace-only queries are empty, not truncate
     assert.deepEqual(plan.chunks, []);
     assert.equal(plan.truncated, false);
   }
+});
+
+/* ------------------------------------------------------------------ *
+ * TASK-017: loose chain order — segment the RAW chunk FIRST, then
+ * looseForm each token, mirroring the index-side looseForm(buildIndexPayload)
+ * chain so the query phrase is space-joined loose tokens like the loose rows.
+ * ------------------------------------------------------------------ */
+
+test("loose chain: tone-mark variants collapse to one spaced phrase", { skip }, () => {
+  const accented = buildLooseFtsMatch("ป้าไป");
+  assert.equal(accented, buildLooseFtsMatch("ป่าไป"), "tone-mark variants must agree");
+  // The whole point of the fix: the phrase joins loose tokens WITH spaces
+  // ("ปา ไป"), exactly like the loose index rows — never a glued single token.
+  assert.match(accented, /^"[^"]+ [^"]+"$/, `expected a spaced loose phrase: ${accented}`);
+});
+
+test("loose e2e: tone-typo query reaches the correctly-marked doc", { skip }, () => {
+  const store = openFts5Store({ memory: true });
+  store.add({ id: 1, body: "ป้าไปตลาด" });
+  const hits = fts5Search(store, "ป้าไป", { tone: "loose" });
+  assert.ok(hits.length >= 1, `expected >=1 loose hit, got ${hits.length}`);
+  store.close();
 });

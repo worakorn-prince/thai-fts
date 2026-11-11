@@ -204,10 +204,10 @@ export function buildFtsMatch(query: string, opts?: MatchBuildOptions): string {
 /**
  * Query-side twin of buildFtsMatch for the de-accented LOOSE channel. Mirrors
  * buildFtsMatch's structure exactly — Thai chunk -> single ordered phrase,
- * ASCII chunk -> OR the transliteration counterpart(s) in — but every chunk is
- * first routed through looseForm() (strips only Thai tone-level marks, keeps
- * vowels, lowercases). This is what makes the transform chain agree with the
- * loose index rows (which store looseForm of the strict payload): "ติดตั้ง"
+ * ASCII chunk -> OR the transliteration counterpart(s) in — but the Thai path
+ * segments the RAW chunk first, then routes each token through looseForm()
+ * (strips only Thai tone-level marks, keeps vowels, lowercases), mirroring the
+ * index side looseForm(buildIndexPayload(...)) chain exactly: "ติดตั้ง"
  * and "ติดตัง" both become the same loose phrase here, so a tone-mark typo can
  * still match the correctly-marked document. For pure-ASCII queries looseForm
  * is only a lowercase, so buildLooseFtsMatch ≡ buildFtsMatch's match set (FTS5
@@ -223,8 +223,8 @@ export function buildLooseFtsMatch(query: string, opts?: MatchBuildOptions): str
   const allTerms = opts?.allTerms === true;
   const out: string[] = [];
   for (const chunkRaw of chunks) {
+    const thai = hasThai(chunkRaw);
     const chunk = looseForm(chunkRaw);
-    const thai = hasThai(chunk);
     // With `stem` on, the ASCII-chunk synonym expansion runs on the STEMMED
     // chunk: the unstemmed index tokens survive the expandIndexedText pass
     // verbatim (e.g. "install" stays in the payload alongside its stemmed
@@ -232,7 +232,7 @@ export function buildLooseFtsMatch(query: string, opts?: MatchBuildOptions): str
     // or a stemmed query could miss docs whose only copy is the unstemmed
     // token. Thai chunks are untouched by the stem either way.
     const asciiChunk = stem && !thai ? stemEn(chunk) : chunk;
-    const words = stemWords(thai ? segmentQueryChunk(chunk) : [chunk], stem);
+    const words = stemWords(thai ? segmentQueryChunk(chunkRaw).map(looseForm) : [chunk], stem);
     const base = buildPhrase(words, filter, prefix);
     if (!base) continue;
     if (thai) {
@@ -246,8 +246,7 @@ export function buildLooseFtsMatch(query: string, opts?: MatchBuildOptions): str
     }
     const parts: string[] = [base];
     for (const v of variants.slice(1)) {
-      const vl = looseForm(v);
-      const vw = stemWords(hasThai(vl) ? segmentQueryChunk(vl) : [vl], stem);
+      const vw = stemWords(hasThai(v) ? segmentQueryChunk(v).map(looseForm) : [looseForm(v)], stem);
       const vp = buildPhrase(vw, filter, prefix);
       if (vp) parts.push(vp);
     }
