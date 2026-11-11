@@ -34,6 +34,19 @@ export type {
   SegmenterSupport,
   SqliteSupportReport,
 } from "./capability.js";
+export {
+  Fts5ConfigMismatchError,
+  CURRENT_META_VERSION,
+  computeFingerprint,
+  canonicalJson,
+} from "./meta.js";
+export type {
+  ConfigCategory,
+  MetaStatus,
+  IndexConfig,
+  StoredMeta,
+  DictionaryRef,
+} from "./meta.js";
 
 /**
  * Merge per-search options over the engine-level defaults using
@@ -83,6 +96,11 @@ export interface Fts5EngineOptions extends Omit<ThaiEngineOptions, "prefix"> {
    * **OPT-IN: enabling it changes the indexed payload — existing on-disk
    * databases must be rebuilt after toggling.** Default off. */
   stem?: boolean;
+  /** What to do when a reopened file database's persisted metadata disagrees
+   * with this config: `"throw"` (default) raises `Fts5ConfigMismatchError`;
+   * `"ignore"` opens and reports `metaStatus: "mismatch-ignored"`. Legacy
+   * databases (no metadata) always open regardless. */
+  onConfigMismatch?: "throw" | "ignore";
 }
 
 /**
@@ -101,6 +119,7 @@ export function createFts5Engine(opts: Fts5EngineOptions = {}): ThaiSearchEngine
     prefix: Array.isArray(opts.prefix) ? opts.prefix : undefined,
     stopwords: opts.stopwords,
     stem: opts.stem === true,
+    onConfigMismatch: opts.onConfigMismatch,
   });
   const base: ThaiEngineOptions = {};
   if (opts.tone !== undefined) base.tone = opts.tone;

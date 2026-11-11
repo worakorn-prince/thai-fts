@@ -279,6 +279,18 @@ console.log(support.sqliteVersion); // e.g. "3.54.0"
 runtime, the missing capability and the fix — a Node.js release inside the
 package's `engines` range (`>= 22.13.0`).
 
+#### Reopening a database: configuration drift
+
+When you reopen a file-backed FTS5 store, it compares the settings in use against
+the fingerprint persisted at first indexing (`thai_fts_meta`). A change that
+alters the indexed payload is reported by category — `schema` / `prefix` /
+`stopwords` / `stem` / `dictionary` / `segmenter` — and by default raises
+`Fts5ConfigMismatchError` instead of serving stale results. Pass
+`onConfigMismatch: "ignore"` to open anyway (`metaStatus: "mismatch-ignored"`);
+databases written before metadata existed always open as `legacy-unverified`.
+Adopt the new settings deliberately with `rebuild()`, which republishes metadata
+only after a successful re-index.
+
 #### Opt-in search features (all default off)
 
 **Prefix / autocomplete** — open the store with a prefix index, then search with

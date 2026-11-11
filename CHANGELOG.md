@@ -72,6 +72,17 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   still load on a runtime without it; opening a store there throws the new
   `SqliteSupportError` (`.runtime`, `.missing`) naming the fix in the package's
   `engines` range (`>= 22.13.0`). No version constraints changed.
+- **Persisted index metadata + reopen compatibility check** (`thai-fts/fts5`) —
+  the store records a single-row `thai_fts_meta` (`metaVersion` 1) the first time
+  it indexes, holding a deterministic fingerprint of the index-affecting settings
+  (schema/prefix/stopwords/stem/dictionaries/segmenter) and re-verifies it on
+  reopen. A drifted config throws the typed `Fts5ConfigMismatchError` naming the
+  MISMATCH CATEGORY rather than silently serving stale results or rebuilding;
+  `onConfigMismatch: "throw" | "ignore"` (default `"throw"`) chooses the policy,
+  with `"ignore"` opening anyway and reporting `metaStatus: "mismatch-ignored"`.
+  Additive surface: `metaStatus` / `configFingerprint` / `configMismatch` store
+  getters plus `computeFingerprint` / `canonicalJson` / `CURRENT_META_VERSION`.
+  Legacy databases (no metadata) always open and report `legacy-unverified`.
 
 ### Fixed
 

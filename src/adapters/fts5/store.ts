@@ -31,6 +31,18 @@ import type { ThaiSearchDoc } from "../engine.js";
 import { buildIndexPayload } from "../_align.js";
 import { buildLooseSchema, buildStrictSchema } from "./schema.js";
 import { requireSqlite } from "./capability.js";
+import {
+  buildIndexConfig,
+  computeFingerprint,
+  CURRENT_META_VERSION,
+  diffCategories,
+  Fts5ConfigMismatchError,
+  publishMetaOnce,
+  publishMetaUpsert,
+  readMeta,
+  tableExists,
+} from "./meta.js";
+import type { ConfigCategory, IndexConfig, MetaStatus } from "./meta.js";
 
 /** Options for opening a memory- or file-backed FTS5 store. */
 export interface OpenFts5StoreOptions {
@@ -62,6 +74,14 @@ export interface OpenFts5StoreOptions {
    * — existing on-disk databases must be rebuilt** (re-index via `rebuild()`
    * or recreate the file). Default off. */
   stem?: boolean;
+  /** What to do when a reopened file database carries persisted metadata whose
+   * fingerprint disagrees with the config this store is opened with. `"throw"`
+   * (default) raises `Fts5ConfigMismatchError` naming the drifted categories;
+   * `"ignore"` opens anyway and reports `metaStatus: "mismatch-ignored"`, leaving
+   * the stale index untouched until you call `rebuild()` to adopt the new config.
+   * Databases created before metadata existed are ALWAYS opened (they report
+   * `"legacy-unverified"`), regardless of this setting. */
+  onConfigMismatch?: "throw" | "ignore";
 }
 
 /** A row of raw document text as returned by the store. */
@@ -84,6 +104,15 @@ export interface Fts5Store {
   /** Whether opt-in English Porter stemming was enabled at open time.
    * Search reads it so the query-side `stem` stays symmetric with the index. */
   readonly stem: boolean;
+  /** How confidently this store believes its on-disk index matches the config
+   * it was opened with. `"verified"` only when we recorded the config that
+   * built the index; legacy/baseline states never claim verification. */
+  readonly metaStatus: MetaStatus;
+  /** Fingerprint of the effective index-affecting config in use right now. */
+  readonly configFingerprint: string;
+  /** Categories that drifted on a `mismatch-ignored` reopen, or `null` when
+   * nothing drifted (or the state is fresh/legacy). */
+  readonly configMismatch: readonly ConfigCategory[] | null;
   /** Index (or re-index) a document on both channels; replaces any prior row
    * with the same id atomically. Uses registered Thai dictionaries if any. */
   add(doc: ThaiSearchDoc): void;
@@ -166,12 +195,76 @@ export function openFts5Store(opts: OpenFts5StoreOptions = {}): Fts5Store {
         : [...opts.stopwords];
   const stem = opts.stem === true;
 
+  // Detect what already exists BEFORE running any DDL, so creating the tables
+  // (or the metadata table) never masks a legacy database. A legacy DB is one
+  // that already has data but predates the metadata table entirely.
+  const hadMeta = tableExists(db, "thai_fts_meta");
+  const hadDocs = tableExists(db, "documents");
+
   db.exec(DOCUMENTS_DDL);
   db.exec(buildStrictSchema(prefix));
   db.exec(buildLooseSchema(prefix));
 
   for (const def of opts.dictionaries ?? []) {
     registerThaiDictionary(def);
+  }
+
+  // Effective index-affecting config + its fingerprint, recomputed now so a
+  // reopen can compare against whatever the file recorded.
+  const currentConfig: IndexConfig = buildIndexConfig({
+    prefix,
+    stopwords,
+    stem,
+    dictionaries: opts.dictionaries ?? [],
+  });
+  const currentFingerprint = computeFingerprint(currentConfig);
+  const onConfigMismatch = opts.onConfigMismatch ?? "throw";
+
+  // metaStatus starts as "fresh" (nothing indexed yet) and is refined by the
+  // verification below or by the first successful mutation.
+  let metaStatus: MetaStatus = "fresh";
+  let configMismatch: readonly ConfigCategory[] | null = null;
+
+  if (hadMeta) {
+    const stored = readMeta(db);
+    if (!stored) {
+      // Table existed but the row is missing/unreadable — never claim verified.
+      metaStatus = "legacy-unverified";
+    } else if (stored.metaVersion !== CURRENT_META_VERSION) {
+      configMismatch = ["meta-version", ...diffCategories(stored.config, currentConfig)];
+      if (onConfigMismatch === "throw") {
+        db.close();
+        throw new Fts5ConfigMismatchError(
+          configMismatch,
+          stored.fingerprint,
+          currentFingerprint,
+          stored.metaVersion,
+        );
+      }
+      metaStatus = "mismatch-ignored";
+    } else if (stored.fingerprint !== currentFingerprint) {
+      configMismatch = diffCategories(stored.config, currentConfig);
+      if (configMismatch.length === 0) configMismatch = ["schema"];
+      if (onConfigMismatch === "throw") {
+        db.close();
+        throw new Fts5ConfigMismatchError(
+          configMismatch,
+          stored.fingerprint,
+          currentFingerprint,
+          stored.metaVersion,
+        );
+      }
+      metaStatus = "mismatch-ignored";
+    } else {
+      // Fingerprint matches. A "created" origin means we built this index under
+      // this exact config; an "attached-baseline" origin means the config was
+      // adopted onto pre-existing rows we did not index ourselves — stay honest.
+      metaStatus = stored.origin === "created" ? "verified" : "unknown-baseline";
+    }
+  } else if (hadDocs) {
+    // Legacy database (data, no metadata): always openable regardless of the
+    // mismatch policy, but compatibility is NOT verified.
+    metaStatus = "legacy-unverified";
   }
 
   const insStrict = db.prepare(
@@ -246,11 +339,34 @@ export function openFts5Store(opts: OpenFts5StoreOptions = {}): Fts5Store {
     }
   };
 
+  // Publish metadata after a successful mutation, but only when there is no
+  // usable row yet. A "fresh" store records the config as "created"; a legacy
+  // store adopts it as "attached-baseline" (still unverified for its prior
+  // rows). "verified", "unknown-baseline" and "mismatch-ignored" already have a
+  // row we must not silently overwrite.
+  const publishMetaOnMutation = (): void => {
+    if (metaStatus === "fresh") {
+      publishMetaOnce(db, currentConfig, "created");
+      metaStatus = "verified";
+    } else if (metaStatus === "legacy-unverified") {
+      publishMetaOnce(db, currentConfig, "attached-baseline");
+    }
+  };
+
   const store: Fts5Store = {
     type: "fts5",
     db,
     stopwords,
     stem,
+    get metaStatus(): MetaStatus {
+      return metaStatus;
+    },
+    get configFingerprint(): string {
+      return currentFingerprint;
+    },
+    get configMismatch(): readonly ConfigCategory[] | null {
+      return configMismatch;
+    },
     add(doc: ThaiSearchDoc): void {
       assertOpen();
       db.exec("BEGIN");
@@ -261,6 +377,7 @@ export function openFts5Store(opts: OpenFts5StoreOptions = {}): Fts5Store {
         rollbackQuietly();
         throw e;
       }
+      publishMetaOnMutation();
     },
     addMany(docs: Iterable<ThaiSearchDoc>): void {
       assertOpen();
@@ -288,6 +405,7 @@ export function openFts5Store(opts: OpenFts5StoreOptions = {}): Fts5Store {
         rollbackQuietly();
         throw e;
       }
+      publishMetaOnMutation();
     },
     remove(id: string | number): void {
       assertOpen();
@@ -325,6 +443,12 @@ export function openFts5Store(opts: OpenFts5StoreOptions = {}): Fts5Store {
         rollbackQuietly();
         throw e;
       }
+      // Rebuild is the documented way to adopt a new config: publish (or adopt)
+      // the metadata ONLY after the re-index committed, so a failed rebuild
+      // leaves the previous usable index and its metadata untouched.
+      publishMetaUpsert(db, currentConfig, "created");
+      metaStatus = "verified";
+      configMismatch = null;
     },
     close(): void {
       if (closed) return;
