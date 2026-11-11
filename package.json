@@ -67,6 +67,7 @@
     "benchmark": "npm run build && node benchmark/run.mjs",
     "benchmark:quick": "npm run build && node benchmark/run.mjs --quick",
     "benchmark:quality": "npm run build && node benchmark/quality/run.mjs",
+    "benchmark:perf": "npm run build && node benchmark/perf/diagnose.mjs",
     "pack:check": "npm pack --dry-run",
     "prepublishOnly": "npm run build && npm test"
   },

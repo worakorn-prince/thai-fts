@@ -90,6 +90,13 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   (strict / loose / both), with explicit denominators for fewer-than-k and
   no-relevant queries. Writes per-query JSON plus a summary table; a standalone
   script, never a CI gate, and the scores are not a real-world accuracy claim.
+- **Performance diagnosis harness** (`npm run benchmark:perf`) — phase-separated,
+  deterministic measurements (successive-batch indexing throughput, per-doc vs
+  `addMany`, store-free stage split, search p50/p95/p99 over 3 repetitions,
+  `page_count × page_size` index size, phase-boundary RSS/heap) with documented
+  quick / medium / full modes. Measured results and the verdict (no repeatable
+  library-level bottleneck found; no speculative optimization shipped) are in
+  `docs/perf_diagnosis.md`.
 
 ### Fixed
 

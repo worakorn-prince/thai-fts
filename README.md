@@ -536,6 +536,7 @@ npm run benchmark:quick  # fast subset — same shapes, smaller corpus / fewer i
 node benchmark/addmany-vs-add.mjs --quick   # per-doc add() vs bulk addMany() — smoke (500 docs)
 node benchmark/addmany-vs-add.mjs           # same harness at 20,000 docs (~9 min)
 npm run benchmark:quality                   # retrieval quality (P@5 / R@20 / MRR@10 / nDCG@10)
+npm run benchmark:perf                      # performance diagnosis — phased, p50/p95/p99 (~40 s)
 ```
 
 Measured results are written to `benchmark/results/` (performance) and
@@ -549,6 +550,10 @@ judgments, scored per tone variant (strict / loose / both) with explicit
 denominators for fewer-than-k results and no-relevant queries. The scores
 demonstrate is/regression behavior on these fixtures; they are **not** a
 real-world accuracy claim. It runs as its own script, never as a CI gate.
+
+Phase-separated performance numbers (index-build vs warm-up vs query, p50/p95/p99,
+index size, phase-boundary memory) come from `npm run benchmark:perf`; the measured
+diagnosis and verdict live in [`docs/perf_diagnosis.md`](docs/perf_diagnosis.md).
 
 Single-machine sample (Node 26, one dev laptop, seeded corpus — a sample, not a
 fleet average). Full mode segments a 2.41 MiB corpus and indexes 3,000 documents
