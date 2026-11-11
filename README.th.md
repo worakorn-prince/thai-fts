@@ -191,6 +191,27 @@ hit ยังพก `meta` แบบมี type — `ThaiSearchMeta`: `method` (
 - `fts5Search(store, query, opts?)` → `ThaiSearchResult[]` (dual-channel พร้อม hook `filter` และ `prefix`/`offsets`/`titleWeight`)
 - `FTS5_STRICT_SCHEMA`, `FTS5_LOOSE_SCHEMA` — DDL ที่คำนึงเครื่องหมาย (`unicode61 categories 'L* N* Co M*'`)
 
+#### ตรวจสอบความสามารถของรันไทม์
+
+adapter FTS5 จะ resolve `node:sqlite` ตอนเปิด store เท่านั้น ไม่ใช่ตอน import ทำให้ `thai-fts/core` และ `thai-fts/engine` ยังทำงานได้บนรันไทม์ที่ไม่มีโมดูลนี้ ตรวจล่วงหน้าด้วย capability probe — เปิดฐานข้อมูล `:memory:` ชั่วคราว สร้างตาราง FTS5 รัน MATCH ภาษาไทย แล้วปิดทิ้ง:
+
+```js
+import { checkSqliteSupport } from "thai-fts";
+
+const support = checkSqliteSupport();
+if (!support.ok) {
+  // support.missing === ["node:sqlite"] | ["node:sqlite DatabaseSync"] | ["FTS5"]
+  console.error(support.runtime, support.missing, support.guidance);
+}
+console.log(support.sqliteVersion); // เช่น "3.54.0"
+```
+
+`openFts5Store()` / `createFts5Engine()` บนรันไทม์ดังกล่าวจะโยน `SqliteSupportError` (`.runtime`, `.missing`) พร้อมข้อความระบุรันไทม์ที่ตรวจพบ ความสามารถที่ขาด และวิธีแก้ — ใช้ Node.js รุ่นที่อยู่ในช่วง `engines` ของแพ็กเกจ (`>= 22.13.0`)
+
+#### การเปิดฐานข้อมูลซ้ำ: คอนฟิกคลาดเคลื่อน
+
+เมื่อเปิด store แบบไฟล์ซ้ำ มันจะเทียบค่าที่ใช้อยู่กับ fingerprint ที่บันทึกไว้ตอน index ครั้งแรก (`thai_fts_meta`) การเปลี่ยนแปลงที่กระทบ payload ของดัชนีจะถูกรายงานเป็นหมวด — `schema` / `prefix` / `stopwords` / `stem` / `dictionary` / `segmenter` — และโดยค่าเริ่มต้นจะโยน `Fts5ConfigMismatchError` แทนการให้ผลลัพธ์เก่าที่ไม่ตรง ส่ง `onConfigMismatch: "ignore"` เพื่อเปิดต่อ (`metaStatus: "mismatch-ignored"`); ฐานข้อมูลที่เขียนก่อนมี metadata จะเปิดได้เสมอในสถานะ `legacy-unverified` หากต้องการใช้ค่าตั้งใหม่จริง ๆ ให้เรียก `rebuild()` ซึ่งจะเผยแพร่ metadata ใหม่หลัง re-index สำเร็จเท่านั้น
+
 #### Page cache ของ store แบบไฟล์
 
 store ที่ผูกกับไฟล์จะเปิดด้วย page cache ของ SQLite สูงสุด **64 MiB** ตามค่าเริ่มต้น (`cacheSizeKib: 65536`) cache นี้เป็นระดับต่อ connection และจัดสรรแบบ lazy ไม่เปลี่ยนไบต์ที่เก็บไว้ ไม่เปลี่ยนความทนทาน (WAL + `synchronous = NORMAL`) หรือผลการค้นหา และ**ไม่ถูกใส่ใน fingerprint ของคอนฟิก** — เปลี่ยนค่าแล้วไม่ทำให้เกิด rebuild ช่วยลดคอขวดจากการเขียนดิสก์ตอน index แบบ bulk (วัดได้ 2.2× ที่ 3K เอกสาร / 2.9× ที่ 10K เอกสาร บนชุดข้อมูล seeded เดียวกัน) ถ้าต้องการจำกัดหน่วยความจำให้ส่งค่าที่เล็กลง หรือ `cacheSizeKib: 0` เพื่อใช้ค่าเริ่มต้นของ SQLite (store แบบ memory ไม่สนใจค่านี้) ดูรายละเอียดที่ [`docs/perf_diagnosis.md`](docs/perf_diagnosis.md)
