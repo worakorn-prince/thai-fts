@@ -97,6 +97,16 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   quick / medium / full modes. Measured results and the verdict (no repeatable
   library-level bottleneck found; no speculative optimization shipped) are in
   `docs/perf_diagnosis.md`.
+- **64 MiB page-cache default for file-backed stores** — `openFts5Store` /
+  `createFts5Engine` now apply a bounded SQLite `cache_size` cap of 64 MiB for
+  file databases (`cacheSizeKib` option; `0` keeps SQLite's default; memory
+  stores ignore it). It is per-connection and lazily allocated, does not change
+  stored bytes, durability (WAL + `synchronous = NORMAL`), search results or the
+  config fingerprint. Measured on the same seeded corpus: batch indexing
+  **2.2× at 3 000 docs** (174.7 → 380.1 docs/s) and **2.9× at 10 000 docs**
+  (51.0 → 149.0 docs/s), with identical hit ids and identical file sizes.
+  Full 20K harness corpus (206 MiB index): file-store build 1 776 → 1 284 s
+  (1.38×), total run 2 770 → 2 280 s, with 64 MiB measured as the plateau.
 
 ### Fixed
 

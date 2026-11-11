@@ -1,7 +1,9 @@
 # Performance diagnosis — TASK-019 (audit PATCH 5)
 
 Status: **measure-first diagnosis complete for quick + medium + full.** Full mode
-(`--full`, N=20000, digest `40e7ab29`) numbers are below; no production code was changed.
+(`--full`, N=20000, digest `40e7ab29`) numbers are below; no production code was changed
+by TASK-019. A follow-up measured optimization (TASK-020, bounded page cache) is
+documented at the end and changes no results.
 
 Harness: `benchmark/perf/diagnose.mjs` (zero new dependencies). Raw JSON artifacts:
 `benchmark/results/perf-<ISO>.json` (gitignored). Long runs are not wired into `npm test`
@@ -243,12 +245,58 @@ does not attempt to reduce it. The harness deletes the temporary database afterw
 The post-query RSS includes retained JIT/heap the process does not return; it is not a
 leak signal and not a peak. No true peak-RSS instrumentation is included.
 
-## Verdict
+## Shipped optimization — TASK-020 (bounded page cache)
 
-**OPTIMIZE: NO** — no safe library-code optimization is justified by these
-measurements. The full run does confirm a real, size-dependent bottleneck; it is on the
-SQLite/FTS5 write side, not in the library's own pipeline, and the safe levers were
-measured to be neutral:
+After the diagnosis, targeted probes split the file-backed penalty from the FTS5
+write cost and found one safe lever: **the SQLite page cache**. File stores now open
+with a bounded 64 MiB cap (`cacheSizeKib`, default 65536; `0` = SQLite default;
+ignored by memory stores). It is per-connection, lazily allocated, and does not change
+stored bytes, durability (WAL + `synchronous = NORMAL`), search results or the
+TASK-016 config fingerprint.
+
+Same seeded corpus (`buildDocs(n)`), same 500-doc `addMany` batches, file store,
+hit-id arrays compared across 8 queries × 3 tone channels:
+
+| N | before (SQLite default, -2000 KiB) | after (64 MiB cap) | speedup | results / file bytes |
+| --- | --- | --- | --- | --- |
+| 3 000 | 17.17 s → 174.7 docs/s | 7.89 s → 380.1 docs/s | **2.18×** | identical |
+| 10 000 | 196.0 s → 51.0 docs/s | 67.1 s → 149.0 docs/s | **2.92×** | identical |
+
+At 10K the file-backed build (149–153 docs/s) now matches the in-memory build
+(≈145 docs/s) on the same corpus. Cache sweep: 16 MiB reached 377.8 docs/s at 3K;
+at 10K the knee was 32 MiB (140.5 docs/s) and 64 MiB (153.0), with 128 MiB flat
+(150.3). `mmap_size`, `cache_spill`, `temp_store`, `wal_autocheckpoint`,
+`synchronous=OFF`, `journal_mode=DELETE` and FTS5 `automerge`/`crisismerge` all
+measured ≤6% (or are durability changes) and were rejected.
+
+Tradeoff: up to 64 MiB of page cache per open file connection when the working set is
+that large (pages are allocated on demand). Users can lower it with `cacheSizeKib` or
+disable it with `0`. Regression tests: `test/fts5/cache-size.test.mjs` (8 tests,
+including hit-id identity and fingerprint-not-affected).
+
+Harness-level before/after (`--full`, N=20000, same digest `40e7ab29`):
+
+| Phase | Before TASK-020 | After TASK-020 | Delta |
+| --- | --- | --- | --- |
+| In-memory index build (20K) | 390.03 s | 393.19 s | unchanged (noise) |
+| File-store build (20K) | 1 776.1 s | **1 284.5 s** | **1.38× faster** (−27.7 %) |
+| Full-run total | 2 769.6 s | **2 280.3 s** | **17.7 % less wall time** |
+| Query p50 / p99 (strict) | 13.783 / 39.563 ms | 13.910 / 39.483 ms | unchanged (noise) |
+| Index bytes (20K) | 216 379 392 B | 216 379 392 B | identical |
+
+The 20K harness corpus produces a 206 MiB index, larger than the 64 MiB cap, so the
+gain there (1.38×) is smaller than at 3K/10K. A dedicated sweep over a 74 MiB index
+(20K `buildDocs` corpus) showed 64 / 128 / 256 MiB caps all at ≈80 docs/s —
+**64 MiB is already the plateau**; larger caps only cost memory. Users with very large
+indexes can still raise `cacheSizeKib` explicitly.
+
+## Verdict (TASK-019)
+
+**OPTIMIZE: NO** for code-level changes — no safe library-code optimization is
+justified by these measurements. (The page-cache configuration change above was
+found later by targeted probes and shipped as TASK-020.) The full run does confirm a
+real, size-dependent bottleneck; it is on the SQLite/FTS5 write side, not in the
+library's own pipeline, and the safe code-level levers were measured to be neutral:
 
 1. **The JS side is flat and becomes negligible at scale.** The store-free transform
    holds at ≈750 docs/s (1.01× quick/medium, 0.93× full first→last) and drops from
@@ -288,4 +336,5 @@ file-backed cost) rather than segmentation.
 
 * `benchmark/perf/diagnose.mjs` — harness (quick default, `--medium`, `--full`)
 * `benchmark/results/perf-<ISO>.json` — raw artifacts from the runs quoted above
+* `test/fts5/cache-size.test.mjs` — TASK-020 cache option/behavior/fingerprint tests
 * `docs/perf_diagnosis.md` — this report

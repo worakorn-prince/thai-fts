@@ -186,10 +186,14 @@ hit ยังพก `meta` แบบมี type — `ThaiSearchMeta`: `method` (
 
 ### FTS5 — `thai-fts/fts5`
 
-- `createFts5Engine({ path?, memory?, tone?, limit?, prefix?, stopwords? })` → `ThaiSearchEngine`
-- `openFts5Store({ path?, memory?, prefix?, stopwords?, dictionaries? })` → `{ db, add, remove, update, rebuild, close, get, allRows }`
+- `createFts5Engine({ path?, memory?, tone?, limit?, prefix?, stopwords?, cacheSizeKib? })` → `ThaiSearchEngine`
+- `openFts5Store({ path?, memory?, prefix?, stopwords?, dictionaries?, cacheSizeKib? })` → `{ db, add, remove, update, rebuild, close, get, allRows }`
 - `fts5Search(store, query, opts?)` → `ThaiSearchResult[]` (dual-channel พร้อม hook `filter` และ `prefix`/`offsets`/`titleWeight`)
 - `FTS5_STRICT_SCHEMA`, `FTS5_LOOSE_SCHEMA` — DDL ที่คำนึงเครื่องหมาย (`unicode61 categories 'L* N* Co M*'`)
+
+#### Page cache ของ store แบบไฟล์
+
+store ที่ผูกกับไฟล์จะเปิดด้วย page cache ของ SQLite สูงสุด **64 MiB** ตามค่าเริ่มต้น (`cacheSizeKib: 65536`) cache นี้เป็นระดับต่อ connection และจัดสรรแบบ lazy ไม่เปลี่ยนไบต์ที่เก็บไว้ ไม่เปลี่ยนความทนทาน (WAL + `synchronous = NORMAL`) หรือผลการค้นหา และ**ไม่ถูกใส่ใน fingerprint ของคอนฟิก** — เปลี่ยนค่าแล้วไม่ทำให้เกิด rebuild ช่วยลดคอขวดจากการเขียนดิสก์ตอน index แบบ bulk (วัดได้ 2.2× ที่ 3K เอกสาร / 2.9× ที่ 10K เอกสาร บนชุดข้อมูล seeded เดียวกัน) ถ้าต้องการจำกัดหน่วยความจำให้ส่งค่าที่เล็กลง หรือ `cacheSizeKib: 0` เพื่อใช้ค่าเริ่มต้นของ SQLite (store แบบ memory ไม่สนใจค่านี้) ดูรายละเอียดที่ [`docs/perf_diagnosis.md`](docs/perf_diagnosis.md)
 
 #### ฟีเจอร์ค้นหาแบบเลือกเปิด (ปิดทั้งหมดตามค่าเริ่มต้น)
 

@@ -248,8 +248,8 @@ plus any adapter-specific keys.
 
 ### FTS5 — `thai-fts/fts5`
 
-- `createFts5Engine({ path?, memory?, tone?, limit?, prefix?, stopwords? })` → `ThaiSearchEngine`
-- `openFts5Store({ path?, memory?, prefix?, stopwords?, dictionaries? })` → `{ db, add, remove, update, rebuild, close, get, allRows }`
+- `createFts5Engine({ path?, memory?, tone?, limit?, prefix?, stopwords?, cacheSizeKib? })` → `ThaiSearchEngine`
+- `openFts5Store({ path?, memory?, prefix?, stopwords?, dictionaries?, cacheSizeKib? })` → `{ db, add, remove, update, rebuild, close, get, allRows }`
 - `fts5Search(store, query, opts?)` → `ThaiSearchResult[]` (dual-channel, `filter` hook, `prefix`/`offsets`/`titleWeight`)
 - `FTS5_STRICT_SCHEMA`, `FTS5_LOOSE_SCHEMA` — mark-aware DDL (`unicode61 categories 'L* N* Co M*'`)
 - `checkSqliteSupport()` → `{ ok, runtime, sqliteVersion?, segmenter, missing, guidance? }` — opt-in
@@ -290,6 +290,17 @@ alters the indexed payload is reported by category — `schema` / `prefix` /
 databases written before metadata existed always open as `legacy-unverified`.
 Adopt the new settings deliberately with `rebuild()`, which republishes metadata
 only after a successful re-index.
+
+#### File-store page cache
+
+File-backed stores open with a **64 MiB SQLite page-cache cap** by default
+(`cacheSizeKib: 65536`). It is per-connection and lazily allocated, does not
+change stored bytes, durability (WAL + `synchronous = NORMAL`) or search
+results, and is **not** part of the config fingerprint — changing it never
+triggers a rebuild. It removes the disk-bound penalty on batch indexing
+(measured 2.2× at 3K docs / 2.9× at 10K docs on the same seeded corpus). Pass a
+smaller value to bound memory, or `cacheSizeKib: 0` to keep SQLite's default;
+memory stores ignore it. See [`docs/perf_diagnosis.md`](docs/perf_diagnosis.md).
 
 #### Opt-in search features (all default off)
 

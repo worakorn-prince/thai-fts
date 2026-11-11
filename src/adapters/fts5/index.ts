@@ -101,6 +101,11 @@ export interface Fts5EngineOptions extends Omit<ThaiEngineOptions, "prefix"> {
    * `"ignore"` opens and reports `metaStatus: "mismatch-ignored"`. Legacy
    * databases (no metadata) always open regardless. */
   onConfigMismatch?: "throw" | "ignore";
+  /** SQLite page-cache cap for FILE-backed stores in KiB (store-level).
+   * Default **65536** (64 MiB); `0` keeps SQLite's default. Ignored for
+   * memory stores. Not part of the config fingerprint: changing it never
+   * triggers a rebuild or a mismatch error. */
+  cacheSizeKib?: number;
 }
 
 /**
@@ -120,6 +125,7 @@ export function createFts5Engine(opts: Fts5EngineOptions = {}): ThaiSearchEngine
     stopwords: opts.stopwords,
     stem: opts.stem === true,
     onConfigMismatch: opts.onConfigMismatch,
+    cacheSizeKib: opts.cacheSizeKib,
   });
   const base: ThaiEngineOptions = {};
   if (opts.tone !== undefined) base.tone = opts.tone;

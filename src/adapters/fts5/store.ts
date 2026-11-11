@@ -82,6 +82,12 @@ export interface OpenFts5StoreOptions {
    * Databases created before metadata existed are ALWAYS opened (they report
    * `"legacy-unverified"`), regardless of this setting. */
   onConfigMismatch?: "throw" | "ignore";
+  /** SQLite page-cache cap for FILE-backed stores in KiB. Default **65536**
+   * (64 MiB); `0` keeps SQLite's default. Ignored for memory stores. The cache
+   * is per-connection and lazily allocated, so it does not change index bytes,
+   * durability, journaling or search results. Not part of the config
+   * fingerprint: changing it never triggers a rebuild or a mismatch error. */
+  cacheSizeKib?: number;
 }
 
 /** A row of raw document text as returned by the store. */
@@ -171,16 +177,26 @@ type SqliteDatabaseConstructor = { new (location: string): DatabaseSync };
 
 /**
  * Open (or create) an FTS5 document store. File databases use WAL + NORMAL
- * synchronous for crash safety with low write latency; memory databases get
- * the same busy/foreign-key tuning without WAL (a no-op in-memory).
+ * synchronous for crash safety with low write latency and a bounded page cache
+ * (`cacheSizeKib`) for multi-hundred-docs/s batch indexing; memory databases
+ * get the same busy/foreign-key tuning without WAL (a no-op in-memory).
  */
 export function openFts5Store(opts: OpenFts5StoreOptions = {}): Fts5Store {
   const isMemory = opts.memory === true || !opts.path || opts.path === ":memory:";
+  const cacheSizeKib = opts.cacheSizeKib ?? 65536;
+  if (!Number.isInteger(cacheSizeKib) || cacheSizeKib < 0) {
+    throw new TypeError("cacheSizeKib must be an integer >= 0");
+  }
   const SqliteDatabase = requireSqlite() as unknown as SqliteDatabaseConstructor;
   const db = new SqliteDatabase(isMemory ? ":memory:" : (opts.path as string));
 
   for (const pragma of DEFAULT_PRAGMAS) db.exec(pragma);
   if (!isMemory) db.exec("PRAGMA journal_mode = WAL");
+  // Page cache is per-connection and lazily allocated: a bounded cap removes the
+  // disk-bound penalty of large batch indexing without touching stored bytes.
+  if (!isMemory && cacheSizeKib !== 0) {
+    db.exec(`PRAGMA cache_size = -${cacheSizeKib}`);
+  }
 
   // Prefix indexes + stopword list + stemming are fixed at open time. Applying
   // stopwords or stemming changes the indexed payload, so documents must be
