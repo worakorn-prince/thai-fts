@@ -1,8 +1,11 @@
 # thai-fts
 
 [![CI](https://img.shields.io/github/actions/workflow/status/worakorn-prince/thai-fts/ci.yml?branch=master&label=CI)](https://github.com/worakorn-prince/thai-fts/actions/workflows/ci.yml)
+[![npm](https://img.shields.io/npm/v/thai-fts.svg)](https://www.npmjs.com/package/thai-fts)
 [![License: MIT](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
 [![Node](https://img.shields.io/badge/node-%E2%89%A5%2022.13-brightgreen)](package.json)
+
+[English](README.md) · [ภาษาไทย](README.th.md)
 
 **Tone-aware Thai full-text search for Node.js — zero runtime dependencies.**
 
