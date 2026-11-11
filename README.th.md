@@ -9,7 +9,7 @@
 [English](README.md) · [ภาษาไทย](README.th.md)
 
 <p align="center">
-  <img src="https://raw.githubusercontent.com/worakorn-prince/thai-fts/master/access/thai-fts.jpg" alt="thai-fts — tone-aware Thai full-text search for Node.js" width="100%">
+  <img src="https://raw.githubusercontent.com/worakorn-prince/thai-fts/refs/heads/master/access/thai-fts.jpg" alt="thai-fts — tone-aware Thai full-text search for Node.js" width="100%">
 </p>
 
 **การค้นหาแบบข้อความเต็ม (full-text search) ภาษาไทยที่คำนึงถึงวรรณยุกต์ สำหรับ Node.js — ไม่มีการพึ่งพาไลบรารีอื่นตอนรันไทม์ (zero runtime dependencies)**
