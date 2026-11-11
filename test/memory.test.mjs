@@ -186,3 +186,126 @@ test("filter hook: applied per candidate BEFORE the limit (fts5 semantics)", { s
   assert.equal(ids.length, 2, `filter applied before limit: ${ids}`);
   eng.close();
 });
+
+/* ------------------------------------------------------------------ *
+ * TASK-012: AND-mode, truncation visibility, addMany() rollback
+ * ------------------------------------------------------------------ */
+
+test("allTerms: the memory adapter ANDs exactly like the fts5 reference", { skip }, () => {
+  const eng = createMemoryEngine({});
+  eng.add({ id: 1, body: "alpha" });
+  eng.add({ id: 2, body: "beta" });
+  eng.add({ id: 3, body: "alpha beta" });
+  try {
+    // Default OR keeps every partial match; "alpha beta" scores highest, so the
+    // comparison is made on the id SET rather than the ranking.
+    const orIds = eng.search("alpha beta", { tone: "strict" }).map((r) => r.id).sort();
+    assert.deepEqual(orIds, [1, 2, 3], "OR must surface every doc with either chunk");
+    assert.deepEqual(
+      eng.search("alpha beta", { tone: "strict", allTerms: true }).map((r) => r.id),
+      [3],
+      "AND must keep only docs carrying BOTH chunks"
+    );
+    assert.deepEqual(
+      eng.search("alpha", { tone: "strict", allTerms: true }).map((r) => r.id).sort(),
+      eng.search("alpha", { tone: "strict" }).map((r) => r.id).sort(),
+      "one chunk has nothing to AND — the flag must change nothing"
+    );
+  } finally {
+    eng.close();
+  }
+});
+
+test("meta.truncated: memory reports the cap exactly where fts5 does", { skip }, () => {
+  const eng = createMemoryEngine({});
+  const words = Array.from({ length: 9 }, (_, i) => `chunkword${i}`);
+  eng.add({ id: 1, body: words.join(" ") });
+  eng.add({ id: 2, body: "chunkword0" });
+  try {
+    const long = eng.search(words.join(" "), { tone: "strict" });
+    assert.ok(long.length > 0, "a capped query must still return hits");
+    assert.equal(long[0].meta.truncated, true, "the dropped chunk must be visible, not silent");
+    const short = eng.search("chunkword0 chunkword1", { tone: "strict" });
+    assert.ok(short.length > 0);
+    assert.equal("truncated" in short[0].meta, false, "an uncapped hit keeps its original shape");
+  } finally {
+    eng.close();
+  }
+});
+
+test("addMany: a batch that fails mid-iteration leaves the index (and its tie-break order) alone", () => {
+  const eng = createMemoryEngine({});
+  for (const id of ["a", "b", "c"]) eng.add({ id, body: "alpha" });
+  const order = () => eng.search("alpha", { tone: "strict" }).map((r) => r.id);
+  assert.deepEqual(order(), ["a", "b", "c"], "equal scores fall back to insertion order");
+  function* batch() {
+    yield { id: "d", body: "alpha" };
+    throw new Error("generator exploded");
+  }
+  assert.throws(() => eng.addMany(batch()), /generator exploded/);
+  assert.deepEqual(order(), ["a", "b", "c"], "a half-applied batch must restore the exact prior order");
+  eng.add({ id: "e", body: "alpha" });
+  assert.deepEqual(order(), ["a", "b", "c", "e"], "the restored map must keep appending normally");
+  eng.close();
+});
+
+test("addMany: a mid-batch insert failure rolls the inserted docs back", () => {
+  const eng = createMemoryEngine({});
+  for (const id of ["a", "b"]) eng.add({ id, body: "alpha" });
+  const order = () => eng.search("alpha", { tone: "strict" }).map((r) => r.id);
+  assert.deepEqual(order(), ["a", "b"], "equal scores fall back to insertion order");
+  // The getter throws only when insert() reads `body` — after the batch has
+  // been materialized and passed the id validation, so docs "c" and "d" are
+  // already written and the catch-block rollback must undo them.
+  const bad = {
+    id: "x",
+    get body() {
+      throw new Error("body exploded");
+    },
+  };
+  assert.throws(
+    () => eng.addMany([{ id: "c", body: "alpha" }, { id: "d", body: "alpha" }, bad]),
+    /body exploded/
+  );
+  assert.deepEqual(order(), ["a", "b"], "the half-applied batch must be restored exactly");
+  assert.equal(eng.search("alpha", { tone: "strict" }).length, 2, "the new docs must be absent");
+  eng.add({ id: "e", body: "alpha" });
+  assert.deepEqual(order(), ["a", "b", "e"], "the restored map must keep appending normally");
+  eng.close();
+});
+
+test("addMany rejects an id-less doc before touching the index", () => {
+  const eng = createMemoryEngine({});
+  eng.add({ id: "a", body: "alpha" });
+  eng.add({ id: "b", body: "beta" });
+  assert.throws(
+    () => eng.addMany([{ id: "c", body: "gamma" }, { body: "no id at all" }]),
+    TypeError
+  );
+  assert.deepEqual(eng.search("alpha", { tone: "strict" }).map((r) => r.id), ["a"]);
+  assert.equal(eng.search("gamma", { tone: "strict" }).length, 0, "the batch must not have applied");
+  eng.close();
+});
+
+test("addMany keeps the live payload when a replacement batch fails", () => {
+  const eng = createMemoryEngine({});
+  eng.add({ id: "v", body: "version one" });
+  assert.throws(
+    () =>
+      eng.addMany([
+        { id: "w", body: "alpha" },
+        { id: "v", body: "version two" },
+        { body: "bad doc" },
+      ]),
+    TypeError
+  );
+  assert.deepEqual(eng.search("version", { tone: "strict" }).map((r) => r.id), ["v"]);
+  assert.equal(eng.search("two", { tone: "strict" }).length, 0, "the new payload must stay invisible");
+  eng.close();
+});
+
+test("addMany on a closed memory engine throws the guarded error", () => {
+  const eng = createMemoryEngine({});
+  eng.close();
+  assert.throws(() => eng.addMany([{ id: "a", body: "alpha" }]), /Search engine is closed/);
+});

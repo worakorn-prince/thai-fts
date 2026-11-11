@@ -40,6 +40,10 @@ export interface BuiltQuery {
   match: string;
   /** FTS5 match expression for the loose (de-accented) channel. */
   looseMatch: string;
+  /** True when the raw query carried more than `MAX_QUERY_CHUNKS` chunks, so
+   * the ones past the cap were dropped from every expression. Adapters surface
+   * this on `meta.truncated` instead of letting it read as a complete query. */
+  truncated: boolean;
 }
 
 /**

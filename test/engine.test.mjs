@@ -89,3 +89,56 @@ test("BUG-2: engine.search after close throws the same clear error as add", () =
   assert.throws(() => eng.add({ id: "b", body: "x" }), /Search engine is closed/);
   assert.doesNotThrow(() => eng.close(), "engine.close is idempotent");
 });
+
+/* ------------------------------------------------------------------ *
+ * TASK-012: addMany() — the optional bulk seam on the engine contract
+ * ------------------------------------------------------------------ */
+
+test("the built-in fts5 engine exposes a working addMany", () => {
+  const eng = createEngine("fts5", { memory: true });
+  try {
+    assert.equal(typeof eng.addMany, "function", "fts5 must ship the bulk API");
+    eng.addMany([
+      { id: "a", body: "alpha" },
+      { id: "b", body: "beta" },
+    ]);
+    assert.deepEqual(eng.search("alpha", { tone: "strict" }).map((r) => r.id), ["a"]);
+    assert.deepEqual(eng.search("beta", { tone: "strict" }).map((r) => r.id), ["b"]);
+  } finally {
+    eng.close();
+  }
+});
+
+test("addMany on a closed engine throws the same guard as add and search", () => {
+  const eng = createEngine("fts5", { memory: true });
+  eng.close();
+  assert.throws(() => eng.addMany([{ id: "a", body: "alpha" }]), /Search engine is closed/);
+});
+
+test("the memory engine exposes addMany with the same contract", async () => {
+  const { createMemoryEngine } = await import("../dist/index.js");
+  const eng = createMemoryEngine({});
+  try {
+    assert.equal(typeof eng.addMany, "function", "memory must ship the bulk API");
+    eng.addMany([
+      { id: "a", body: "alpha" },
+      { id: "b", body: "beta" },
+    ]);
+    assert.deepEqual(eng.search("alpha", { tone: "strict" }).map((r) => r.id), ["a"]);
+    assert.deepEqual(eng.search("beta", { tone: "strict" }).map((r) => r.id), ["b"]);
+  } finally {
+    eng.close();
+  }
+});
+
+test("an adapter without addMany simply omits it (the contract is optional)", () => {
+  registerEngine("test:nobulk", () => ({
+    type: "fake",
+    add: () => {},
+    remove: () => {},
+    search: () => [],
+    close: () => {},
+  }));
+  const stub = createEngine("test:nobulk");
+  assert.equal(stub.addMany, undefined, "callers must feature-detect, never assume");
+});

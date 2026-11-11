@@ -75,6 +75,11 @@ export interface ThaiEngineOptions {
   /** Weight titles above bodies: title-column hit score × `titleWeight` +
    * body-column hit score. Default (undefined) keeps unweighted ranking. */
   titleWeight?: number;
+  /** AND-mode: require every analyzed chunk of a multi-word query to be present
+   * in a matching document, joining them with FTS5 `AND` instead of `OR`.
+   * Synonym-expanded chunks stay grouped — `(a OR b) AND c`. Default off keeps
+   * recall-oriented OR matching. HTTP adapters accept and ignore this option. */
+  allTerms?: boolean;
 }
 
 /** The minimal engine contract shared by every adapter. Implementations should
@@ -86,6 +91,13 @@ export interface ThaiSearchEngine {
   /** Index (or re-index) a document, replacing any previous row with the same
    * id. Bytes are a fixed point under repeat indexing. */
   add(doc: ThaiSearchDoc): void;
+  /** Bulk-index documents in one transaction: equivalent to calling `add` for
+   * each entry, but either all of them land or none do — a failure part-way
+   * through rolls the whole batch back, including any replacement of an
+   * existing id. An empty iterable is a no-op. Optional: adapters that cannot
+   * batch cheaply leave it out, so callers should feature-detect with
+   * `typeof engine.addMany === "function"` and fall back to `add`. */
+  addMany?(docs: Iterable<ThaiSearchDoc>): void;
   /** Drop every indexed row for `id` (no-op when absent). */
   remove(id: string | number): void;
   /** Ranked hits for `query`, honoring `opts` (see ThaiEngineOptions). */

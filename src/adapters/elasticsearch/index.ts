@@ -185,7 +185,7 @@ export function createElasticsearchEngine(
     const limit = clampLimit(s.limit ?? base.limit);
     const tone = resolveToneMode(s.tone ?? base.tone);
     // Symmetric query pipeline (same index-time stopwords/stem as add()).
-    const { strict, loose } = buildChannelPhrases(trimmed, stopwords, stem);
+    const { strict, loose, truncated } = buildChannelPhrases(trimmed, stopwords, stem);
 
     const out: ThaiSearchResult[] = [];
     const seen = new Set<string>();
@@ -220,7 +220,7 @@ export function createElasticsearchEngine(
         out.push({
           id: ids.restore(rawId),
           rank: out.length + 1,
-          meta: { method: "elasticsearch", channel },
+          meta: truncated ? { method: "elasticsearch", channel, truncated: true } : { method: "elasticsearch", channel },
         });
       }
     };

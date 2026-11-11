@@ -33,6 +33,18 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   merged with the domain seeds).
 - **Segmenter bridge example** — `examples/segmenter-bridge.mjs` (HTTP bridge
   to a local PyThaiNLP service + sync dict stub + restore).
+- **Bulk indexing** — `addMany(docs)`, an optional engine method (fts5 +
+  memory) for all-or-nothing bulk indexing with rollback on failure (fts5:
+  a single transaction; memory: snapshot rollback); feature-detect with
+  `typeof engine.addMany === "function"`, otherwise fall back to `add()`.
+- **`allTerms: true`** — opt-in AND-join across whitespace-delimited chunks;
+  synonym expansions stay parenthesized (`(a OR b) AND c`) because FTS5
+  precedence is `NOT > AND > OR`; the default OR-join is unchanged.
+- **`meta.truncated`** — hits carry `meta.truncated: true` when a query exceeds
+  `MAX_QUERY_CHUNKS` (8) and gets truncated, omitted when false; also surfaced
+  by the Meilisearch / Elasticsearch adapters.
+- **`BuiltQuery.truncated`** — the exported `BuiltQuery` now carries
+  `truncated: boolean` (additive field) next to `match` / `looseMatch`.
 
 ### Fixed (QA pass on the FTS5 adapter)
 

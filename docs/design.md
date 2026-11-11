@@ -235,18 +235,53 @@ corpus and write results into `benchmark/results/`:
   reads 4.29 vs 3.41 MiB/s.
 - **Indexing throughput** in docs/s, reported separately for bulk `rebuild()` and
   per-doc `add()`. Full mode (3,000 documents of ≈ 840 bytes) gives ≈ 210 and
-  ≈ 309 docs/s. This is dominated by SQLite FTS5 inserts, not Thai tokenization,
-  so docs/s scales down as documents get bigger and quick mode (500 documents)
-  reads much higher — 1112 / 787 docs/s.
+  ≈ 309 docs/s, and quick mode (500 documents) reads much higher — 1112 / 787
+  docs/s. Indexing is dominated by the JS-side segment + synonym pipeline (and
+  the FTS5 index writes it feeds), **not** by per-document SQLite transaction
+  overhead: `benchmark/addmany-vs-add.mjs` indexes 20,000 seeded documents
+  (16.35 MiB) both ways and collapses one-transaction-per-doc into a single
+  batch transaction for only 73 → 77 docs/s (1.05×). The corpus-size effect
+  (≈ 309 docs/s at 3,000 documents → ≈ 73 docs/s at 20,000) tracks per-doc
+  payload work and index growth, not the transaction count.
 - **Search latency** percentiles per channel. Full mode, 250 samples: strict
   p50 3.39 / p95 7.53 ms, loose 3.07 / 6.76 ms, prefix 3.35 / 7.47 ms,
   `like_fallback` 1.36 / 2.06 ms. Quick mode: strict 1.72 / 4.19, loose
   2.18 / 3.32, prefix 1.99 / 4.41, `like_fallback` 1.45 / 2.30 ms.
 
 Absolute numbers are machine-dependent (CPU, storage, OS); only run-to-run
-comparisons on one machine carry meaning. Charabia's published ~22 MiB/s for Thai
-segmentation is cited as an external reference point next to our measured
-~4.3 MiB/s on this machine — different corpora and hardware, and no
-ranking-quality claim is made against any other Thai segmenter or search stack.
+comparisons on one machine carry meaning.
+
+**Bulk indexing** (`benchmark/addmany-vs-add.mjs`, node v26.12.1, win32,
+20,000 seeded documents / 16.35 MiB, same corpus generator as `run.mjs`): the
+per-doc `engine.add()` loop reaches ≈ 73 docs/s (272 s) and the
+single-transaction `engine.addMany()` ≈ 77 docs/s (260 s) — a 1.05× speedup.
+Batching removes the per-doc transaction overhead and is still worth taking on
+hot indexing paths, but it is not the bottleneck; the JS segment + synonym
+pipeline is.
+
+Segmentation throughput against other Thai tools (reference points, not a
+leaderboard):
+
+| Segmenter | Throughput (MiB/s) | Runtime cost |
+| --- | --- | --- |
+| wordcut (native C++) | ≈ 0.32 | native binding |
+| thai-fts — `Intl.Segmenter` path | ≈ 3.23 | zero-dependency |
+| thai-fts — dictionary + syllable fallback | ≈ 1.82 | zero-dependency |
+| Charabia (WASM) | ≈ 22 | WASM payload |
+
+The thai-fts figures in this table come from a separate measurement session
+and differ slightly from the `run.mjs` samples quoted above (≈ 4.26 / 3.03
+MiB/s on this machine) — corpora and hardware differ; both samples keep the
+same ordering and order of magnitude. Charabia's ≈ 22 MiB/s is a published
+figure cited as an external reference. No ranking-quality claim is made
+against any other Thai segmenter or search stack.
+
+Positioning: thai-fts is **not** the fastest Thai segmenter — Charabia's WASM
+path clearly wins raw segmentation. The trade is everything else in the box:
+thai-fts is fast enough for full-text indexing, zero-dependency (no WASM, no
+native bindings, no runtime npm deps), and ships full-text search with BM25
+ranking plus tone-sensitive strict/loose dual-channel merging in one package —
+none of the comparison tools offer that combination in-package.
+
 CI does not run benchmarks; it keeps the build/test/typecheck/pack signal fast
 and deterministic.

@@ -73,3 +73,74 @@ test("replace same id updates payload; rebuild dedupes", { skip }, () => {
   assert.equal(store.allRows().length, 2);
   store.close();
 });
+
+/* ------------------------------------------------------------------ *
+ * TASK-012: addMany() — one transaction per batch, all-or-nothing
+ * ------------------------------------------------------------------ */
+
+test("addMany indexes the same rows as repeated add, in the same order", () => {
+  const docs = [
+    { id: "a", title: "first", body: "alpha" },
+    { id: "b", title: "", body: "beta" },
+    { id: 7, title: "num", body: "gamma" },
+  ];
+  const bulk = openFts5Store({ memory: true });
+  const oneByOne = openFts5Store({ memory: true });
+  try {
+    bulk.addMany(docs);
+    for (const d of docs) oneByOne.add(d);
+    assert.deepEqual(bulk.allRows(), oneByOne.allRows(), "bulk must be indistinguishable from add()");
+  } finally {
+    bulk.close();
+    oneByOne.close();
+  }
+});
+
+test("addMany rolls the whole batch back when a doc mid-way is rejected", () => {
+  const store = openFts5Store({ memory: true });
+  function* batch() {
+    yield { id: "ok1", title: "", body: "alpha" };
+    yield { id: "ok2", title: "", body: "beta" };
+    yield { title: "", body: "this doc has no id" };
+  }
+  try {
+    assert.throws(() => store.addMany(batch()), TypeError);
+    assert.equal(store.allRows().length, 0, "the two valid docs must not survive a rolled-back batch");
+  } finally {
+    store.close();
+  }
+});
+
+test("addMany leaves the previous row untouched when a replacement fails", () => {
+  const store = openFts5Store({ memory: true });
+  try {
+    store.add({ id: "x", title: "", body: "version one" });
+    function* batch() {
+      yield { id: "y", title: "", body: "beta" };
+      yield { id: "x", title: "", body: "version two" };
+      yield { title: "", body: "boom" };
+    }
+    assert.throws(() => store.addMany(batch()), TypeError);
+    assert.equal(store.get("x").body, "version one", "a half-applied replacement must not stick");
+    assert.equal(store.allRows().length, 1, "the batch sibling doc must roll back too");
+  } finally {
+    store.close();
+  }
+});
+
+test("addMany treats an empty batch as a no-op (no transaction opened)", () => {
+  const store = openFts5Store({ memory: true });
+  try {
+    store.addMany([]);
+    store.addMany((function* () {})());
+    assert.equal(store.allRows().length, 0);
+  } finally {
+    store.close();
+  }
+});
+
+test("addMany on a closed store throws the guarded error, like add()", () => {
+  const store = openFts5Store({ memory: true });
+  store.close();
+  assert.throws(() => store.addMany([{ id: "a", body: "alpha" }]), /FTS5 store is closed/);
+});

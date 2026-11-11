@@ -198,35 +198,44 @@ function phrasePositions(
 }
 
 /**
- * Score ONE document against one channel's word lists (OR semantics: a doc
- * is a candidate when at least one chunk's phrase matches). Returns the
- * candidate (match-count score + every matched region for the offsets pass)
- * or null when nothing matches. `weight` set → `titleHits*weight + bodyHits`
- * (the fts5 `titleWeight` contract); unset → `titleHits + bodyHits`.
+ * Score ONE document against one channel's word lists. Default OR semantics: a
+ * doc is a candidate when at least one chunk's phrase matches. With `allTerms`
+ * every analyzed (non-empty) chunk must match — the AND-mode twin of the fts5
+ * `AND` join — so a doc missing any one chunk is not a candidate at all.
+ * Returns the candidate (match-count score + every matched region for the
+ * offsets pass) or null when nothing matches. `weight` set →
+ * `titleHits*weight + bodyHits` (the fts5 `titleWeight` contract); unset →
+ * `titleHits + bodyHits`.
  */
 function scoreDoc(
   doc: DocRecord,
   phrases: readonly string[][],
   prefix: boolean,
   weight: number | undefined,
-  looseChannel: boolean
+  looseChannel: boolean,
+  allTerms: boolean
 ): Candidate | null {
   const tTok = looseChannel ? doc.looseTitleTokens : doc.strictTitleTokens;
   const bTok = looseChannel ? doc.looseBodyTokens : doc.strictBodyTokens;
   let titleHits = 0;
   let bodyHits = 0;
+  let groups = 0;
+  let matched = 0;
   const regions: Region[] = [];
   for (const words of phrases) {
     if (words.length === 0) continue;
+    groups++;
     const tp = phrasePositions(tTok, words, prefix);
     const bp = phrasePositions(bTok, words, prefix);
     if (tp.length === 0 && bp.length === 0) continue;
+    matched++;
     titleHits += tp.length;
     bodyHits += bp.length;
     for (const p of tp) regions.push({ col: 0, start: p, n: words.length });
     for (const p of bp) regions.push({ col: 1, start: p, n: words.length });
   }
   if (titleHits === 0 && bodyHits === 0) return null;
+  if (allTerms && matched < groups) return null;
   const score = weight === undefined ? titleHits + bodyHits : titleHits * weight + bodyHits;
   return { doc, score, regions };
 }
@@ -258,6 +267,7 @@ export function createMemoryEngine(opts: MemoryEngineOptions = {}): MemorySearch
   if (opts.offsets !== undefined) base.offsets = opts.offsets;
   if (opts.titleWeight !== undefined) base.titleWeight = opts.titleWeight;
   if (opts.prefix !== undefined) base.prefix = opts.prefix === true;
+  if (opts.allTerms !== undefined) base.allTerms = opts.allTerms;
 
   const docs = new Map<string, DocRecord>();
   let orderSeq = 0;
@@ -319,11 +329,12 @@ export function createMemoryEngine(opts: MemoryEngineOptions = {}): MemorySearch
     const weightRaw = s.titleWeight !== undefined ? s.titleWeight : base.titleWeight;
     const weight = Number.isFinite(weightRaw) ? Number(weightRaw) : undefined;
     const filter = s.filter;
+    const allTerms = (s.allTerms !== undefined ? s.allTerms : base.allTerms) === true;
     const needles = buildNeedles(trimmed);
     // Symmetric query pipeline (shared with the fts5/HTTP adapters): stopword
     // + stem flags come from the store-level options, so index and query stay
     // symmetric without per-search configuration.
-    const { strict, loose } = buildChannelPhrases(trimmed, stopwords, stem);
+    const { strict, loose, truncated } = buildChannelPhrases(trimmed, stopwords, stem);
 
     const results: ThaiSearchResult[] = [];
     const seen = new Set<string>();
@@ -334,7 +345,7 @@ export function createMemoryEngine(opts: MemoryEngineOptions = {}): MemorySearch
       const looseChannel = channel === "loose";
       const cands: Candidate[] = [];
       for (const doc of docs.values()) {
-        const c = scoreDoc(doc, phrases, prefix, weight, looseChannel);
+        const c = scoreDoc(doc, phrases, prefix, weight, looseChannel, allTerms);
         if (c) cands.push(c);
       }
       // Match-count desc; insertion order as the deterministic tie-break.
@@ -354,11 +365,15 @@ export function createMemoryEngine(opts: MemoryEngineOptions = {}): MemorySearch
           if (!filter(candidate)) continue;
         }
         seen.add(key);
+        const meta: Record<string, unknown> = { method: "memory", channel };
+        // Only ever set when the query really was cut down — the default hit
+        // shape stays byte-for-byte what it was before.
+        if (truncated) meta.truncated = true;
         results.push({
           id: c.doc.id,
           rank: results.length + 1,
           snippet: makeSnippet(c.doc.title, c.doc.body, needles),
-          meta: { method: "memory", channel },
+          meta,
         });
         docsByResult.push(c.doc);
         regionsByResult.push(c.regions);
@@ -457,6 +472,40 @@ export function createMemoryEngine(opts: MemoryEngineOptions = {}): MemorySearch
     add(doc: ThaiSearchDoc): void {
       assertOpen();
       insert(doc);
+    },
+    addMany(batch: Iterable<ThaiSearchDoc>): void {
+      assertOpen();
+      const incoming = [...batch];
+      if (incoming.length === 0) return;
+      // Rollback state captured BEFORE the first mutation: the prior record of
+      // every id the batch touches, plus the map's key order — insertion order
+      // is the ranking tie-break, so restoring content while re-ordering the
+      // entries would not be a true undo of a half-applied batch.
+      const order = [...docs.keys()];
+      const prev = new Map<string, DocRecord | undefined>();
+      for (const d of incoming) {
+        if (d == null || d.id === null || d.id === undefined) {
+          throw new TypeError("memory engine addMany() requires a document with an id");
+        }
+        const key = String(d.id);
+        if (!prev.has(key)) prev.set(key, docs.get(key));
+      }
+      try {
+        for (const d of incoming) insert(d);
+      } catch (e) {
+        const restored = new Map<string, DocRecord>();
+        for (const id of order) {
+          const p = prev.get(id);
+          if (p !== undefined) restored.set(id, p);
+          else if (!prev.has(id)) {
+            const cur = docs.get(id);
+            if (cur) restored.set(id, cur);
+          }
+        }
+        docs.clear();
+        for (const [id, rec] of restored) docs.set(id, rec);
+        throw e;
+      }
     },
     remove(id: string | number): void {
       assertOpen();

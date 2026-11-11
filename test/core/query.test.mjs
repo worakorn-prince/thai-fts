@@ -113,3 +113,70 @@ test("NFC invariance on the query side (precomposed vs decomposed)", () => {
   assert.equal(buildLooseFtsMatch("caf\u00e9"), buildLooseFtsMatch("cafe\u0301"));
   assert.equal(buildSearchQuery("ใช้e\u0301").match, buildSearchQuery("ใช้\u00e9").match);
 });
+
+/* ------------------------------------------------------------------ *
+ * TASK-012: AND-mode (`allTerms`) + truncation visibility
+ * ------------------------------------------------------------------ */
+
+// The expected group text is DERIVED from the default builder, never retyped:
+// that proves AND-mode reuses the exact same per-chunk expression and only
+// changes how the chunks are joined.
+const deployGroup = buildFtsMatch("deploy");
+const deployGroupLoose = buildLooseFtsMatch("deploy");
+
+test("allTerms off: every builder stays byte-identical to the default path", { skip }, () => {
+  // The regression gate for the whole task: without the flag nothing moves —
+  // no parentheses, OR-join, same phrase order.
+  assert.equal(buildFtsMatch("deploy program"), `${deployGroup} OR "program"`);
+  assert.equal(buildFtsMatch("pnpm npm"), '"pnpm" OR "npm"');
+  assert.equal(buildLooseFtsMatch("deploy program"), `${deployGroupLoose} OR "program"`);
+  assert.equal(buildFtsMatch("deploy", { allTerms: false }), buildFtsMatch("deploy"));
+  assert.equal(buildLooseFtsMatch("deploy", { allTerms: false }), buildLooseFtsMatch("deploy"));
+  assert.equal(buildSearchQuery("deploy program").match, `${deployGroup} OR "program"`);
+});
+
+test("allTerms on: multi-chunk queries AND-join, synonym groups stay grouped", { skip }, () => {
+  // A synonym-expanded chunk is ONE unit: `(a OR b) AND c`, never `a OR b AND c`
+  // (which would leak `b` out of the AND or widen the whole query).
+  assert.equal(
+    buildFtsMatch("deploy program", { allTerms: true }),
+    `(${deployGroup}) AND "program"`
+  );
+  assert.equal(
+    buildLooseFtsMatch("deploy program", { allTerms: true }),
+    `(${deployGroupLoose}) AND "program"`
+  );
+  const thaiPhrase = buildFtsMatch("ติดตั้้ง");
+  assert.equal(
+    buildFtsMatch(`deploy ${thaiPhrase.slice(1, -1).replace(/\s/g, "")}`, { allTerms: true }),
+    `(${deployGroup}) AND ${thaiPhrase}`
+  );
+});
+
+test("allTerms on: no redundant parens when a chunk is already a bare phrase", { skip }, () => {
+  // Two bare phrases need no grouping — `"a" AND "b"` is already correct — and
+  // a lone Thai chunk is untouched, so the AND output stays minimal.
+  assert.equal(buildFtsMatch("pnpm npm", { allTerms: true }), '"pnpm" AND "npm"');
+  assert.equal(buildFtsMatch("zzz", { allTerms: true }), '"zzz"');
+  assert.equal(buildFtsMatch("ติดตั้้ง", { allTerms: true }), buildFtsMatch("ติดตั้้ง"));
+});
+
+test("buildSearchQuery: allTerms is threaded into both match expressions", { skip }, () => {
+  const q = buildSearchQuery("deploy program", { allTerms: true });
+  assert.equal(q.match, `(${deployGroup}) AND "program"`);
+  assert.equal(q.looseMatch, `(${deployGroupLoose}) AND "program"`);
+});
+
+test("buildSearchQuery.truncated flags the 8-chunk cap (MAX_QUERY_CHUNKS)", () => {
+  // MAX_QUERY_CHUNKS is exported from `thai-fts/core` (asserted in
+  // smoke.test.mjs), so the cap is also asserted through the observable
+  // `truncated` flag + chunk count.
+  const words = (n) => Array.from({ length: n }, (_, i) => `w${i}`).join(" ");
+  const atCap = buildSearchQuery(words(8));
+  const pastCap = buildSearchQuery(words(9));
+  assert.equal(atCap.truncated, false, "exactly at the cap is not truncated");
+  assert.equal(atCap.chunks.length, 8);
+  assert.equal(pastCap.truncated, true, "one chunk past the cap must be flagged");
+  assert.equal(pastCap.chunks.length, 8, "the dropped chunk is gone from the expressions");
+  assert.ok(!pastCap.match.includes("w8"), `w8 must not appear: ${pastCap.match}`);
+});

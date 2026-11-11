@@ -31,6 +31,7 @@ import {
   filterStopwordsLoose,
 } from "../core/stopwords.js";
 import { stemEn } from "../core/stem.js";
+import { MAX_QUERY_CHUNKS } from "../core/query.js";
 
 /** Verified raw-text offset of a matched region (RAW document coordinates). */
 export interface VerifiedOffset {
@@ -214,12 +215,16 @@ export function buildIndexPayload(
   return tokens.map((t) => stemEn(t)).join(" ");
 }
 
-/** Per-channel query word lists for one query (max 8 chunks). */
+/** Per-channel query word lists for one query (max `MAX_QUERY_CHUNKS` chunks). */
 export interface ChannelPhrases {
   /** Strict channel: one word list per query chunk (empty list = no chunk). */
   strict: string[][];
   /** Loose channel: the de-accented twin of `strict`. */
   loose: string[][];
+  /** True when the raw query held more than `MAX_QUERY_CHUNKS` chunks, so the
+   * ones past the cap are absent from both channels. Adapters surface this as
+   * `meta.truncated` rather than letting a narrowed query read as complete. */
+  truncated: boolean;
 }
 
 /**
@@ -248,11 +253,12 @@ export function buildChannelPhrases(
   stopwords: readonly string[],
   stem: boolean
 ): ChannelPhrases {
-  const chunks = normalizeThaiInput(String(query ?? ""))
+  const rawChunks = normalizeThaiInput(String(query ?? ""))
     .trim()
     .split(/\s+/)
-    .filter(Boolean)
-    .slice(0, 8);
+    .filter(Boolean);
+  const truncated = rawChunks.length > MAX_QUERY_CHUNKS;
+  const chunks = rawChunks.slice(0, MAX_QUERY_CHUNKS);
   const strict: string[][] = [];
   const loose: string[][] = [];
   for (const chunk of chunks) {
@@ -269,5 +275,5 @@ export function buildChannelPhrases(
     const lThai = hasThai(lChunk);
     loose.push(mk(lThai ? segmentQueryChunk(lChunk) : [lChunk], true));
   }
-  return { strict, loose };
+  return { strict, loose, truncated };
 }

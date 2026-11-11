@@ -86,6 +86,11 @@ export interface Fts5Store {
   /** Index (or re-index) a document on both channels; replaces any prior row
    * with the same id atomically. Uses registered Thai dictionaries if any. */
   add(doc: ThaiSearchDoc): void;
+  /** Index a batch of documents in ONE transaction — equivalent to `add` for
+   * each entry, but either the whole batch lands or none of it does (a failure
+   * part-way rolls back every insert, including replacements of existing ids).
+   * An empty iterable is a no-op. */
+  addMany(docs: Iterable<ThaiSearchDoc>): void;
   /** Drop the document (and its FTS rows) by id. No-op when absent. */
   remove(id: string | number): void;
   /** Convenience for replace-then-index (identical semantics to `add`). */
@@ -231,6 +236,33 @@ export function openFts5Store(opts: OpenFts5StoreOptions = {}): Fts5Store {
       db.exec("BEGIN");
       try {
         insert(doc);
+        db.exec("COMMIT");
+      } catch (e) {
+        db.exec("ROLLBACK");
+        throw e;
+      }
+    },
+    addMany(docs: Iterable<ThaiSearchDoc>): void {
+      assertOpen();
+      // One transaction for the whole batch: the BEGIN is deferred until the
+      // first doc so an empty (or immediately throwing) iterable never touches
+      // the database, and the iterator is consumed lazily so a generator of a
+      // million docs does not have to be materialized first.
+      let open = false;
+      try {
+        for (const doc of docs) {
+          if (!open) {
+            db.exec("BEGIN");
+            open = true;
+          }
+          insert(doc);
+        }
+      } catch (e) {
+        if (open) db.exec("ROLLBACK");
+        throw e;
+      }
+      if (!open) return;
+      try {
         db.exec("COMMIT");
       } catch (e) {
         db.exec("ROLLBACK");

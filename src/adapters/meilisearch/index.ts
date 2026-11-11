@@ -179,7 +179,7 @@ export function createMeilisearchEngine(
     const limit = clampLimit(s.limit ?? base.limit);
     const tone = resolveToneMode(s.tone ?? base.tone);
     // Symmetric query pipeline (same index-time stopwords/stem as add()).
-    const { strict, loose } = buildChannelPhrases(trimmed, stopwords, stem);
+    const { strict, loose, truncated } = buildChannelPhrases(trimmed, stopwords, stem);
 
     const doSearch = async (
       phrases: string[][],
@@ -235,7 +235,7 @@ export function createMeilisearchEngine(
         out.push({
           id: ids.restore(baseId),
           rank: out.length + 1,
-          meta: { method: "meilisearch", channel },
+          meta: truncated ? { method: "meilisearch", channel, truncated: true } : { method: "meilisearch", channel },
         });
       }
     };

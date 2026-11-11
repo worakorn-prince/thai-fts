@@ -149,12 +149,23 @@ thai-fts --json search "ติดตั้ง" --db db.sqlite          # { ok: t
 
 ### Engine — `thai-fts/engine`
 
-- `ThaiSearchEngine` — `{ add(doc), remove(id), search(query, opts?), close() }`
+- `ThaiSearchEngine` — `{ add(doc), remove(id), search(query, opts?), close() }` — เพิ่ม `addMany(docs)` สำหรับ index แบบชุด เป็น method เสริมแบบ optional บน interface (ดูหัวข้อด้านล่าง)
 - `ThaiSearchDoc`, `ThaiSearchResult`, `ThaiEngineOptions`, `ThaiEngineFactory`
 - `registerEngine(name, factory)`, `createEngine(name, opts?)`, `listEngines()`, `unregisterAllEngines()`
 - `createMemoryEngine(opts?)` → `ThaiSearchEngine` แบบ in-memory ที่ไม่มี dependencies เลย (สำหรับเทสต์/ออฟไลน์/ข้อมูลเล็ก) ลงทะเบียนเป็น `"memory"`
 - `createMeilisearchEngine({ endpoint, index, apiKey?, ... })`, `createElasticsearchEngine({ endpoint, index, apiKey?, ... })` → อะแดปเตอร์ HTTP แบบ reference ขั้นต่ำ (`add`/`remove`/`search` เป็น async — ดู `HttpSearchEngine`) ลงทะเบียนเป็น `"meilisearch"` / `"elasticsearch"`
 - `HttpSearchEngine` — คอนแทรกต์เอนจินแบบ async ที่อะแดปเตอร์ HTTP อิมพลีเมนต์ (`close()` ยังเป็น sync)
+
+#### การ index แบบชุด — `addMany()` (optional)
+
+`addMany(docs)` index เอกสารทั้ง iterable ใน **transaction เดียว** แบบ all-or-nothing: ถ้าเอกสารตัวใดในชุดทำให้ error พุ่งขึ้นกลางคัน ทั้งชุดจะ rollback ทั้งหมด ดัชนีจึงกลับสู่สภาพเดิมก่อนโหลดทุกครั้ง มันเป็น optional บน `ThaiSearchEngine` (อะแดปเตอร์ HTTP แบบ reference ไม่ได้ implement มัน) จึงต้องตรวจก่อนแล้วค่อย fallback ไปหา `add`:
+
+```js
+if (typeof engine.addMany === "function") engine.addMany(docs);
+else for (const doc of docs) engine.add(doc);
+```
+
+มีให้ใช้บนเอนจิน FTS5 และ memory มันตัด per-document transaction overhead ออก แต่บนชุดข้อมูลขนาดใหญ่ส่วนนั้นไม่ใช่คอขวด: เอกสาร seeded 20,000 ฉบับ index ได้ ≈ 73 docs/s แบบต่อเอกสาร เทียบกับ ≈ 77 docs/s แบบรวมชุด (1.05×) บนเครื่องนี้ — รับไว้ตอน index ถี่ ๆ ได้ แต่อย่าคาดหวังความเร็วระดับเท่าตัว (ดูหัวข้อ Benchmarks ด้านล่าง)
 
 ### FTS5 — `thai-fts/fts5`
 
@@ -207,6 +218,16 @@ const engine = createFts5Engine({ memory: true, stem: true });
 engine.add({ id: "x", body: "we are running the tests" });
 engine.search("run"); // เจอ — ทั้งสองฝั่งถูกย่อเป็น "run"
 ```
+
+**ทุกคำต้องตรง (AND-join)** — OPT-IN: `allTerms: true` บังคับให้ **ทุก** chunk ที่คั่นด้วยช่องว่างของคำค้นหลายคำต้องปรากฏในเอกสารที่ตรงกัน แทนการ join แบบ OR ตามค่าเริ่มต้น ส่วน chunk ที่ขยายเป็นหลาย phrase คำพ้องจะถูกล้อมรวมเป็นกลุ่ม — `(a OR b) AND c` — เพราะลำดับความสำคัญของ FTS5 คือ `NOT > AND > OR` ถ้าไม่ล้อม `a OR b AND c` จะเปลี่ยนความหมายไปเงียบ ๆ:
+
+```js
+engine.search("ติดตั้ง โปรแกรม", { allTerms: true }); // ต้องมีครบทั้งสอง chunk
+```
+
+การปิดตัวเลือกนี้คงผลลัพธ์ OR-join ให้ตรงกับค่าเริ่มต้นแบบ byte-for-byte และคำค้นที่มี chunk เดียวก็เหมือนกันด้วย (ไม่ใส่กลุ่มเกินจำเป็น) จะตั้งเป็นรายครั้งตามตัวอย่างข้างบน หรือตั้งเป็นค่า default ของเอนจินก็ได้ (`createFts5Engine({ allTerms: true })`)
+
+**การตัดคำค้นที่เกินจำนวน chunk** — คำค้นจะถูกใช้เพียง 8 chunk แรก (ขีดจำกัดที่ export เป็น `MAX_QUERY_CHUNKS`) ส่วนที่เหลือจะถูกตัดออกจากทุก expression เมื่อเกิดกรณีนี้ hit จะแนบ `meta.truncated: true` มาด้วย (ไม่แสดงเมื่อเป็น false) เพื่อให้คำค้นที่ถูกแคบลงไม่อ่านดูเหมือนครอบคลุมครบถ้วน
 
 ## นโยบายวรรณยุกต์
 
@@ -303,6 +324,8 @@ npx tsc --noEmit   # ตรวจชนิด
 ```sh
 npm run benchmark        # ครบชุด — การตัดคำ, ทำดัชนี, ความหน่วงของการค้นหา (~40 s)
 npm run benchmark:quick  # แบบรวดเร็ว — รูปแบบผลลัพธ์เหมือนเดิม แต่ใช้ชุดข้อมูลและจำนวนรอบน้อยกว่า (~3 s)
+node benchmark/addmany-vs-add.mjs --quick   # เทียบ add() ต่อเอกสาร กับ addMany() แบบรวมชุด — smoke test (500 ฉบับ)
+node benchmark/addmany-vs-add.mjs           # harness เดิมที่ 20,000 ฉบับ (~9 นาที)
 ```
 
 ผลลัพทธิ์ที่วัดได้จะเขียนลงโฟลเดอร์ `benchmark/results/` ตัวเลขขึ้นอยู่กับเครื่องที่รัน (CPU, storage, OS) จึงควรอ่านเป็นค่าเปรียบเทียบรอบต่อรอบบนเครื่องเดียวกัน ไม่ใช่ตัวเลขการันตีสำหรับทุกเครื่อง
@@ -313,8 +336,8 @@ npm run benchmark:quick  # แบบรวดเร็ว — รูปแบบ
 | --- | --- | --- |
 | การตัดคำ (`Intl.Segmenter`) | ≈ 4.26 MiB/s (235 ms) | ขอบเขตคำตาม full ICU |
 | การตัดคำ (พจนานุกรม + พยางค์สำรอง) | ≈ 3.03 MiB/s (329.8 ms) | บนชุดข้อมูลนี้ **ช้ากว่า** เล็กน้อย |
-| ทำดัชนี แบบ bulk `rebuild()` | ≈ 210 docs/s | ติดเพดานการแทรกของ SQLite FTS5 |
-| ทำดัชนี แบบต่อเอกสาร `add()` | ≈ 309 docs/s | คอขวดเดียวกัน บวก overhead ต่อคำสั่ง |
+| index แบบ bulk `rebuild()` | ≈ 210 docs/s | ไปตาม pipeline ตัดคำ + คำพ้องฝั่ง JS และการเขียนดัชนี FTS5 ที่มันป้อนให้ |
+| index แบบต่อเอกสาร `add()` | ≈ 309 docs/s | งานเดียวกัน บวก overhead ต่อคำสั่งและต่อ transaction |
 | ค้นหา `strict` | p50 3.39 / p95 7.53 ms | |
 | ค้นหา `loose` | p50 3.07 / p95 6.76 ms | |
 | ค้นหา `prefix` | p50 3.35 / p95 7.47 ms | |
@@ -324,8 +347,23 @@ quick mode ให้ตัวเลขเทียบกัน: ตัดคำ 
 
 ข้อควรระวังสองข้อที่ควรบอกตรง ๆ:
 
-- **การทำดัชนีไม่ได้ติดคอขวดเรื่องการตัดคำไทย** — มันถูกจำกัดด้วยการแทรกเข้า SQLite FTS5 ดังนั้น throughput จึงแปรตามขนาดเอกสาร docs/s จะ *ลดลง* เมื่อเอกสารใหญ่ขึ้น ตัวเลขที่สูงกว่าใน quick mode เกิดจากเอกสารเล็กและน้อยกว่า ไม่ใช่เพราะ tokenizer เร็วขึ้น
+- **การทำ index ไม่ได้ติดคอขวดเรื่อง transaction** — การยุบ transaction ต่อเอกสารให้เหลือ transaction เดียวทั้งชุด (`benchmark/addmany-vs-add.mjs`: เอกสาร seeded 20,000 ฉบับ / 16.35 MiB) ทำให้ความเร็วขยับจาก ≈ 73 → ≈ 77 docs/s เท่านั้น คือ 1.05× ต้นทุนจริงอยู่ที่ JS-side segment + synonym pipeline และการเขียนดัชนี FTS5 ที่มันป้อนให้ throughput จึงแปรตามขนาดของชุดข้อมูล (≈ 309 docs/s ที่ 3,000 ฉบับ → ≈ 73 docs/s ที่ 20,000 ฉบับ) ตัวเลขที่สูงกว่าใน quick mode เกิดจากเอกสารเล็กและน้อยกว่า ไม่ใช่เพราะ tokenizer เร็วขึ้น
 - **throughput การตัดคำไม่ใช่ตารางแข่งขัน** — เราวัดได้ ~4.3 MiB/s บนเครื่องนี้ ส่วน Charabia เผยแพร่ ~22 MiB/s ไว้เป็นจุดอ้างอิงภายนอก ซึ่งเป็นคนละชุดข้อมูลและคนละเครื่อง — ตัวเลขทั้งหมดนี้ครอบคลุมเฉพาะ throughput กับ latency เท่านั้น `thai-fts` ไม่ได้กล่าวอ้างความเหนือกว่าด้านการจัดอันดับผลลัพธ์ (ranking) เมื่อเทียบกับ segmenter หรือ search stack ไทยอื่น
+
+## เทียบกับเครื่องมือไทยอื่น ๆ
+
+ตัวเลขอ้างอิง ไม่ใช่ตารางแข่งขัน — คนละชุดข้อมูล คนละเครื่อง และคนละครั้งที่วัด และ **ไม่มีการอ้างความเหนือกว่าด้านการจัดอันดับผลลัพธ์ (ranking)** กับเครื่องมืออื่น
+
+| Segmenter | Throughput (MiB/s) | ต้นทุนตอนรันไทม์ |
+| --- | --- | --- |
+| wordcut (native C++) | ≈ 0.32 | native binding |
+| thai-fts — เส้นทางการ `Intl.Segmenter` | ≈ 3.23 | zero-dependency |
+| thai-fts — dictionary + syllable fallback | ≈ 1.82 | zero-dependency |
+| Charabia (WASM) | ≈ 22 | WASM payload |
+
+ตัวเลขแถวของ thai-fts ในตารางนี้มาจากการวัดคนละครั้งกับตัวอย่าง `run.mjs` ข้างบน (≈ 4.26 / 3.03 MiB/s บนเครื่องนี้) — ชุดข้อมูลและเครื่องต่างกัน แต่ทั้งสองครั้งเรียงลำดับเหมือนกัน ส่วนตัวเลข ≈ 22 MiB/s ของ Charabia เป็นค่าที่เผยแพร่จากภายนอก
+
+สรุปคือ thai-fts **ไม่ใช่** segmenter ไทยที่เร็วที่สุด — เส้นทาง WASM ของ Charabia ชนะเรื่องการตัดคำชัดเจน สิ่งที่ได้แลกคือของทั้งกล่องที่เหลือ: เร็วพอสำหรับการ index ข้อความเต็ม, ไม่มี dependencies ตอนรันไทม์ (ไม่มี WASM ไม่มี native binding) และมี full-text search พร้อมการจัดอันดับ BM25 รวมทั้ง dual-channel strict/loose ที่คำนึงวรรณยุกต์อยู่ในแพ็กเกจเดียว — ไม่มีเครื่องมือไหนในตารางที่ให้ครบชุดนี้ในตัวเอง
 
 ## ลิขสิทธิ์
 

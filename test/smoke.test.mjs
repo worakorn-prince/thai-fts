@@ -1,7 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { createRequire } from "node:module";
-import { version, core, engine, fts5, createFts5Engine, wordTokens, createEngine } from "thai-fts";
+import { version, core, engine, fts5, createFts5Engine, wordTokens, createEngine, MAX_QUERY_CHUNKS } from "thai-fts";
 
 test("thai-fts root ESM export exposes a version string via self-reference", () => {
   assert.equal(typeof version, "string");
@@ -25,6 +25,7 @@ test("root re-exports the full public surface (core + engine + fts5)", () => {
   assert.equal(typeof createFts5Engine, "function");
   assert.equal(typeof wordTokens, "function");
   assert.equal(typeof createEngine, "function");
+  assert.equal(MAX_QUERY_CHUNKS, 8, "MAX_QUERY_CHUNKS is a public constant equal to 8");
 });
 
 async function assertSubpath(importPath, expectations) {

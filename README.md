@@ -186,12 +186,30 @@ PyThaiNLP integration: `node examples/segmenter-bridge.mjs`.
 
 ### Engine — `thai-fts/engine`
 
-- `ThaiSearchEngine` — `{ add(doc), remove(id), search(query, opts?), close() }`
+- `ThaiSearchEngine` — `{ add(doc), remove(id), search(query, opts?), close() }`; bulk `addMany(docs)` is optional on the interface (see below)
 - `ThaiSearchDoc`, `ThaiSearchResult`, `ThaiEngineOptions`, `ThaiEngineFactory`
 - `registerEngine(name, factory)`, `createEngine(name, opts?)`, `listEngines()`, `unregisterAllEngines()`
 - `createMemoryEngine(opts?)` → zero-dependency in-memory `ThaiSearchEngine` (tests / offline / small data), registered as `"memory"`
 - `createMeilisearchEngine({ endpoint, index, apiKey?, ... })`, `createElasticsearchEngine({ endpoint, index, apiKey?, ... })` → minimal REFERENCE HTTP adapters (async `add`/`remove`/`search` — see `HttpSearchEngine`), registered as `"meilisearch"` / `"elasticsearch"`
 - `HttpSearchEngine` — the async engine contract the HTTP adapters implement (`close()` stays sync)
+
+#### Bulk indexing — `addMany()` (optional)
+
+`addMany(docs)` indexes an iterable in **one transaction**, all-or-nothing: if a
+document throws mid-batch the whole batch rolls back, so a failed load leaves the
+index exactly as it was. It is optional on `ThaiSearchEngine` (the reference HTTP
+adapters don't implement it), so feature-detect and fall back to `add`:
+
+```js
+if (typeof engine.addMany === "function") engine.addMany(docs);
+else for (const doc of docs) engine.add(doc);
+```
+
+Available on the FTS5 and memory engines. It removes per-document transaction
+overhead, but on large corpora that is not the bottleneck: 20,000 seeded
+documents index at ≈ 73 docs/s per-doc vs ≈ 77 docs/s batched (1.05×) on this
+machine — take the win on hot paths, don't expect an order of magnitude (see
+[Benchmarks](#benchmarks)).
 
 ### FTS5 — `thai-fts/fts5`
 
@@ -257,6 +275,25 @@ const engine = createFts5Engine({ memory: true, stem: true });
 engine.add({ id: "x", body: "we are running the tests" });
 engine.search("run"); // matches — both sides stem to "run"
 ```
+
+**All terms (AND-join)** — OPT-IN: `allTerms: true` requires **every**
+whitespace-delimited chunk of a multi-word query to be present, instead of the
+default OR-join. A chunk that expands into several synonym phrases stays grouped
+— `(a OR b) AND c` — because FTS5 precedence is `NOT > AND > OR`, so an
+unparenthesized `a OR b AND c` would silently re-associate:
+
+```js
+engine.search("ติดตั้ง โปรแกรม", { allTerms: true }); // both chunks required
+```
+
+Default off keeps the OR-join output byte-identical, and a single-chunk query is
+byte-identical too (no redundant parentheses). Set it per search as above, or as
+an engine default (`createFts5Engine({ allTerms: true })`).
+
+**Query truncation** — only the first 8 chunks of a query are used (the exported
+`MAX_QUERY_CHUNKS` cap); the rest are dropped from every expression. When that
+happens the hits carry `meta.truncated: true` (omitted when false), so a narrowed
+query never reads as if it were complete.
 
 ## Tone policy
 
@@ -389,6 +426,8 @@ npx tsc --noEmit   # typecheck
 ```sh
 npm run benchmark        # full suite — segmentation, indexing, search latency (~40 s)
 npm run benchmark:quick  # fast subset — same shapes, smaller corpus / fewer iterations (~3 s)
+node benchmark/addmany-vs-add.mjs --quick   # per-doc add() vs bulk addMany() — smoke (500 docs)
+node benchmark/addmany-vs-add.mjs           # same harness at 20,000 docs (~9 min)
 ```
 
 Measured results are written to `benchmark/results/`. Numbers move with the
@@ -404,8 +443,8 @@ of ≈ 840 bytes each, with 250 search samples; quick mode shrinks that to
 | --- | --- | --- |
 | Segmentation, `Intl.Segmenter` | ≈ 4.26 MiB/s (235 ms) | full-ICU word boundaries |
 | Segmentation, dictionary + syllable fallback | ≈ 3.03 MiB/s (329.8 ms) | slightly **slower** on this corpus |
-| Indexing, bulk `rebuild()` | ≈ 210 docs/s | dominated by SQLite FTS5 inserts |
-| Indexing, per-doc `add()` | ≈ 309 docs/s | same bottleneck, plus per-call overhead |
+| Indexing, bulk `rebuild()` | ≈ 210 docs/s | JS segment + synonym pipeline + the FTS5 index writes it feeds |
+| Indexing, per-doc `add()` | ≈ 309 docs/s | same work, plus per-call / per-transaction overhead |
 | Search, `strict` | p50 3.39 / p95 7.53 ms | |
 | Search, `loose` | p50 3.07 / p95 6.76 ms | |
 | Search, `prefix` | p50 3.35 / p95 7.47 ms | |
@@ -417,15 +456,42 @@ Quick mode, for comparison: segmentation 4.29 vs 3.41 MiB/s, indexing
 
 Two caveats worth stating plainly:
 
-- **Indexing is not Thai-tokenization-bound.** It is bounded by SQLite FTS5
-  inserts, so throughput tracks document size — docs/s scales *down* as documents
-  get bigger, and quick mode's higher numbers reflect smaller/fewer documents,
-  not a faster tokenizer.
+- **Indexing is not transaction-bound.** Collapsing one-transaction-per-doc into
+  a single batch transaction (`benchmark/addmany-vs-add.mjs`: 20,000 seeded
+  documents / 16.35 MiB) moves only ≈ 73 → ≈ 77 docs/s — a 1.05× speedup — so the
+  cost sits in the JS-side segment + synonym pipeline and the FTS5 index writes it
+  feeds. Throughput therefore tracks corpus size (≈ 309 docs/s at 3,000 documents,
+  ≈ 73 docs/s at 20,000), and quick mode's higher numbers reflect smaller/fewer
+  documents, not a faster tokenizer.
 - **Segmentation throughput is not a leaderboard entry.** We measured ≈ 4.3 MiB/s
   on this machine; Charabia publishes ~22 MiB/s for Thai segmentation as an
   external reference point. Different corpora and machines — and the figures here
   cover throughput and latency only: `thai-fts` makes **no ranking-quality claim**
   against any other Thai segmenter or search stack.
+
+## Comparing with other Thai tools
+
+Reference points, not a leaderboard — different corpora, machines and measurement
+sessions, and **no ranking-quality claim** is made against any other tool.
+
+| Segmenter | Throughput (MiB/s) | Runtime cost |
+| --- | --- | --- |
+| wordcut (native C++) | ≈ 0.32 | native binding |
+| thai-fts — `Intl.Segmenter` path | ≈ 3.23 | zero-dependency |
+| thai-fts — dictionary + syllable fallback | ≈ 1.82 | zero-dependency |
+| Charabia (WASM) | ≈ 22 | WASM payload |
+
+The thai-fts rows come from a separate measurement session and differ slightly
+from the `run.mjs` samples quoted above (≈ 4.26 / 3.03 MiB/s on this machine) —
+corpora and hardware differ, and both samples keep the same ordering. Charabia's
+figure is published externally.
+
+So thai-fts is **not** the fastest Thai segmenter — Charabia's WASM path clearly
+wins raw segmentation. The trade is everything else in the box: fast enough for
+full-text indexing, zero runtime dependencies (no WASM, no native bindings), and
+full-text search with BM25 ranking plus tone-sensitive strict/loose dual-channel
+merging in one package — none of the comparison tools offer that combination
+in-package.
 
 ## License
 

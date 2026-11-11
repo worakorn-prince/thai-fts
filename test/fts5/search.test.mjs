@@ -423,3 +423,92 @@ test("QA: like_fallback tone-loose second scan surfaces the typo doc", { skip },
   assert.deepEqual([...both].sort(), [1, 2], "loose second scan must add the correct-tone doc");
   store.close();
 });
+
+/* ------------------------------------------------------------------ *
+ * TASK-012: AND-mode (`allTerms`) + truncation visibility
+ * ------------------------------------------------------------------ */
+
+test("allTerms: AND-mode narrows the OR result set to docs carrying every chunk", { skip }, () => {
+  const store = storeWith(
+    { id: 1, title: "", body: "alpha" },
+    { id: 2, title: "", body: "beta" },
+    { id: 3, title: "", body: "alpha beta" }
+  );
+  const orIds = fts5Search(store, "alpha beta", { tone: "strict" })
+    .map((r) => r.id)
+    .sort();
+  assert.deepEqual(orIds, [1, 2, 3], "default OR must surface every doc with either chunk");
+  const andIds = fts5Search(store, "alpha beta", { tone: "strict", allTerms: true })
+    .map((r) => r.id);
+  assert.deepEqual(andIds, [3], "AND-mode must keep only docs carrying BOTH chunks");
+  store.close();
+});
+
+test("allTerms: a Thai chunk ANDs together exactly like the ASCII path", { skip }, () => {
+  // Index and query read the SAME constant, so the two sides cannot drift.
+  const thaiWord = "ประกรอม";
+  const store = storeWith(
+    { id: 1, title: "", body: "alpha" },
+    { id: 2, title: "", body: thaiWord },
+    { id: 3, title: "", body: `alpha ${thaiWord}` }
+  );
+  const query = `alpha ${thaiWord}`;
+  const orIds = fts5Search(store, query, { tone: "strict" }).map((r) => r.id).sort();
+  assert.deepEqual(orIds, [1, 2, 3], "OR keeps every partial match");
+  assert.deepEqual(
+    fts5Search(store, query, { tone: "strict", allTerms: true }).map((r) => r.id),
+    [3],
+    "AND must drop docs that carry only one of the two chunks"
+  );
+  store.close();
+});
+
+test("allTerms: a single-chunk query is a no-op for the flag", { skip }, () => {
+  const store = storeWith({ id: 1, title: "", body: "alpha" });
+  assert.deepEqual(
+    fts5Search(store, "alpha", { tone: "strict", allTerms: true }).map((r) => r.id),
+    fts5Search(store, "alpha", { tone: "strict" }).map((r) => r.id),
+    "one chunk has nothing to AND — the flag must change nothing"
+  );
+  store.close();
+});
+
+test("allTerms: a synonym group stays parenthesized against FTS5 precedence", { skip }, () => {
+  // FTS5 binds NOT > AND > OR. Without the group parentheses the query would
+  // re-associate into `"alpha" AND "deploy" OR "<thai-deploy>"`, i.e.
+  // `("alpha" AND "deploy") OR "<thai-deploy>"` — and doc 2 ("deploy", whose
+  // index payload also carries the Thai deploy synonym) would leak into the
+  // AND result.
+  const store = storeWith(
+    { id: 1, title: "", body: "alpha" },
+    { id: 2, title: "", body: "deploy" },
+    { id: 3, title: "", body: "alpha deploy" }
+  );
+  const query = "alpha deploy";
+  assert.deepEqual(
+    fts5Search(store, query, { tone: "strict" }).map((r) => r.id).sort(),
+    [1, 2, 3],
+    "the default OR-join still keeps every partial match"
+  );
+  assert.deepEqual(
+    fts5Search(store, query, { tone: "strict", allTerms: true }).map((r) => r.id),
+    [3],
+    "the synonym group must stay grouped: (a OR b) AND c"
+  );
+  store.close();
+});
+
+test("meta.truncated: only a query cut past the chunk cap reports it", { skip }, () => {
+  const words = Array.from({ length: 9 }, (_, i) => `chunkword${i}`);
+  const store = storeWith(
+    { id: 1, title: "", body: words.join(" ") },
+    { id: 2, title: "", body: "chunkword0" }
+  );
+  const long = fts5Search(store, words.join(" "), { tone: "strict" });
+  assert.ok(long.length > 0, "a capped query must still return hits");
+  assert.equal(long[0].meta.truncated, true, "the dropped chunk must be visible, not silent");
+  const short = fts5Search(store, "chunkword0 chunkword1", { tone: "strict" });
+  assert.ok(short.length > 0);
+  assert.equal("truncated" in short[0].meta, false, "an uncapped hit keeps its original shape");
+  store.close();
+});

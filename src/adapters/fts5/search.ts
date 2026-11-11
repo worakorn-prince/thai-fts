@@ -179,6 +179,7 @@ export function fts5Search(
     prefix: opts.prefix === true,
     stopwords: store.stopwords,
     stem: store.stem,
+    allTerms: opts.allTerms === true,
   });
   const db = store.db;
   const results: ThaiSearchResult[] = [];
@@ -201,9 +202,11 @@ export function fts5Search(
       if (!opts.filter(candidate)) return;
     }
     seen.add(key);
-    results.push(
-      toResult(row, needles, results.length + 1, { method: "fts5", channel })
-    );
+    const meta: Record<string, unknown> = { method: "fts5", channel };
+    // Only ever set when the query really was cut down — leaving it absent
+    // keeps the default hit shape byte-for-byte what it was before.
+    if (built.truncated) meta.truncated = true;
+    results.push(toResult(row, needles, results.length + 1, meta));
   };
 
   // Default (unweighted) path: a single `ORDER BY rank` scan per channel.

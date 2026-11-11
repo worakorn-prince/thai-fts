@@ -268,6 +268,119 @@ test("elasticsearch search: match_phrase on th_token/th_token_loose, strict-then
   await srv.close();
 });
 
+test("meilisearch search: meta.truncated surfaces only a capped query", async () => {
+  const srv = await startFakeServer((rec) => {
+    if (rec.method === "POST" && rec.path === "/indexes/docs/search") {
+      return { body: { hits: [{ id: "a", _rankingScore: 1 }] } };
+    }
+    return 200;
+  });
+  const eng = createMeilisearchEngine({ endpoint: srv.endpoint, index: "docs" });
+  const words = Array.from({ length: 9 }, (_, i) => `chunkword${i}`);
+  const capped = await eng.search(words.join(" "), { tone: "strict" });
+  assert.equal(capped.length, 1);
+  assert.equal(capped[0].meta.truncated, true, "the dropped 9th chunk must be visible");
+  assert.deepEqual(capped[0].meta, {
+    method: "meilisearch",
+    channel: "strict",
+    truncated: true,
+  });
+  // The request only carried the first 8 chunks; the 9th is gone.
+  const cappedQ = srv.requests.at(-1).body.q;
+  assert.ok(!cappedQ.includes("chunkword8"), `the 9th chunk must be dropped: ${cappedQ}`);
+  const short = await eng.search("chunkword0 chunkword1", { tone: "strict" });
+  assert.equal(short.length, 1);
+  assert.deepEqual(
+    short[0].meta,
+    { method: "meilisearch", channel: "strict" },
+    "an uncapped hit keeps its original meta shape (no `truncated` key)"
+  );
+  eng.close();
+  await srv.close();
+});
+
+test("meilisearch search: allTerms is accepted and ignored (no payload change)", async () => {
+  const srv = await startFakeServer((rec) => {
+    if (rec.method === "POST" && rec.path === "/indexes/docs/search") {
+      return { body: { hits: [{ id: "a", _rankingScore: 1 }, { id: "b", _rankingScore: 0.5 }] } };
+    }
+    return 200;
+  });
+  const eng = createMeilisearchEngine({ endpoint: srv.endpoint, index: "docs" });
+  const before = srv.requests.length;
+  const plain = await eng.search("alpha beta", { tone: "strict" });
+  const plainBodies = srv.requests.slice(before).map((r) => r.body);
+  const mid = srv.requests.length;
+  const andTerms = await eng.search("alpha beta", { tone: "strict", allTerms: true });
+  const andBodies = srv.requests.slice(mid).map((r) => r.body);
+  assert.deepEqual(andTerms, plain, "allTerms must not change the result");
+  assert.deepEqual(
+    andBodies,
+    plainBodies,
+    "allTerms is not sent to the server: the request payload stays identical"
+  );
+  eng.close();
+  await srv.close();
+});
+
+test("elasticsearch search: meta.truncated surfaces only a capped query", async () => {
+  const srv = await startFakeServer((rec) => {
+    if (rec.method === "POST" && rec.path === "/docs/_search") {
+      return { body: { hits: { hits: [{ _id: "a", _score: 1 }] } } };
+    }
+    return 200;
+  });
+  const eng = createElasticsearchEngine({ endpoint: srv.endpoint, index: "docs" });
+  const words = Array.from({ length: 9 }, (_, i) => `chunkword${i}`);
+  const capped = await eng.search(words.join(" "), { tone: "strict" });
+  assert.equal(capped.length, 1);
+  assert.equal(capped[0].meta.truncated, true, "the dropped 9th chunk must be visible");
+  assert.deepEqual(capped[0].meta, {
+    method: "elasticsearch",
+    channel: "strict",
+    truncated: true,
+  });
+  const should = srv.requests.at(-1).body.query.bool.should;
+  assert.equal(should.length, 8, "the request carries at most MAX_QUERY_CHUNKS chunks");
+  assert.ok(
+    !JSON.stringify(should).includes("chunkword8"),
+    "the 9th chunk must be dropped from the request"
+  );
+  const short = await eng.search("chunkword0 chunkword1", { tone: "strict" });
+  assert.equal(short.length, 1);
+  assert.deepEqual(
+    short[0].meta,
+    { method: "elasticsearch", channel: "strict" },
+    "an uncapped hit keeps its original meta shape (no `truncated` key)"
+  );
+  eng.close();
+  await srv.close();
+});
+
+test("elasticsearch search: allTerms is accepted and ignored (no payload change)", async () => {
+  const srv = await startFakeServer((rec) => {
+    if (rec.method === "POST" && rec.path === "/docs/_search") {
+      return { body: { hits: { hits: [{ _id: "a", _score: 1 }, { _id: "b", _score: 0.5 }] } } };
+    }
+    return 200;
+  });
+  const eng = createElasticsearchEngine({ endpoint: srv.endpoint, index: "docs" });
+  const before = srv.requests.length;
+  const plain = await eng.search("alpha beta", { tone: "strict" });
+  const plainBodies = srv.requests.slice(before).map((r) => r.body);
+  const mid = srv.requests.length;
+  const andTerms = await eng.search("alpha beta", { tone: "strict", allTerms: true });
+  const andBodies = srv.requests.slice(mid).map((r) => r.body);
+  assert.deepEqual(andTerms, plain, "allTerms must not change the result");
+  assert.deepEqual(
+    andBodies,
+    plainBodies,
+    "allTerms is not sent to the server: the request payload stays identical"
+  );
+  eng.close();
+  await srv.close();
+});
+
 test("elasticsearch: non-2xx rejects; remove swallows 404; closed throws", async () => {
   let n = 0;
   const srv = await startFakeServer((rec) => {

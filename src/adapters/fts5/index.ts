@@ -76,12 +76,17 @@ export function createFts5Engine(opts: Fts5EngineOptions = {}): ThaiSearchEngine
   if (opts.offsets !== undefined) base.offsets = opts.offsets;
   if (opts.titleWeight !== undefined) base.titleWeight = opts.titleWeight;
   if (typeof opts.prefix === "boolean") base.prefix = opts.prefix;
+  if (opts.allTerms !== undefined) base.allTerms = opts.allTerms;
   let closed = false;
   return {
     type: "fts5",
     add(doc: ThaiSearchDoc) {
       if (closed) throw new Error("Search engine is closed");
       store.add(doc);
+    },
+    addMany(docs: Iterable<ThaiSearchDoc>) {
+      if (closed) throw new Error("Search engine is closed");
+      store.addMany(docs);
     },
     remove(id) {
       if (closed) throw new Error("Search engine is closed");

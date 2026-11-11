@@ -41,12 +41,31 @@
  *    the store-level `stem` option so index and query stay symmetric.
  *    **Enabling it changes the indexed payload: existing indexes must be
  *    rebuilt after toggling it.** Default off keeps the query byte-identical.
+ *  - `allTerms` (default off): join the per-chunk expressions with FTS5 `AND`
+ *    instead of `OR`, so every whitespace-delimited chunk of a multi-word query
+ *    must be present in a matching document. A chunk that expands into several
+ *    synonym phrases is wrapped in parentheses — `(a OR b) AND c` — because
+ *    FTS5 precedence is `NOT > AND > OR`, so an unparenthesized `a OR b AND c`
+ *    would silently re-associate into `a OR (b AND c)`. A chunk with a single
+ *    phrase stays parenthesized-free, so a one-chunk `allTerms` query is
+ *    byte-identical to the default one. Default off keeps the OR-join output
+ *    byte-identical.
+ *
+ * Whichever mode is used, only the FIRST `MAX_QUERY_CHUNKS` chunks of a query
+ * are analyzed; `buildSearchQuery` reports the truncation on
+ * `BuiltQuery.truncated` so adapters can surface it instead of silently
+ * dropping terms.
  */
 import { hasThai, looseForm, normalizeThaiInput, segmentQueryChunk } from "./segment.js";
 import { expandChunkSynonyms } from "./synonyms.js";
 import { filterStopwords, filterStopwordsLoose } from "./stopwords.js";
 import { stemEn } from "./stem.js";
 import type { BuiltQuery, QueryChunk, ToneMode } from "./types.js";
+
+/** Hard cap on how many whitespace-delimited query chunks any builder will
+ * analyze. Chunks past the cap are dropped — `buildSearchQuery` reports that
+ * through `BuiltQuery.truncated` rather than failing silently. */
+export const MAX_QUERY_CHUNKS = 8;
 
 /** Shared options for the MATCH builders. */
 export interface MatchBuildOptions {
@@ -59,6 +78,12 @@ export interface MatchBuildOptions {
    * `stem` option: enabling it changes the indexed payload, so existing
    * indexes must be rebuilt. Default off. */
   stem?: boolean;
+  /** Join the per-chunk expressions with `AND` instead of the default `OR`, so
+   * every analyzed chunk must appear in a matching document. Multi-phrase
+   * (synonym-expanded) chunks get parenthesized — `(a OR b) AND c` — so FTS5's
+   * `NOT > AND > OR` precedence cannot re-associate the expression. Default off
+   * keeps the match string byte-identical. */
+  allTerms?: boolean;
 }
 
 /** Token-list filter derived from `MatchBuildOptions.stopwords` (may be
@@ -101,11 +126,27 @@ export function quoteFtsToken(t: string): string {
   return t.replace(/\\/g, "\\\\").replace(/"/g, '""');
 }
 
+/** Join one chunk's synonym phrases. In the default OR mode the chunk's parts
+ * are simply `OR`-ed together (byte-identical to the historical output). In
+ * `allTerms` mode the group is parenthesized when it holds more than one
+ * phrase, so an enclosing `AND` cannot bind into it (FTS5 precedence is
+ * `NOT > AND > OR`); a single-phrase chunk stays bare. */
+function joinGroup(parts: readonly string[], allTerms: boolean): string {
+  if (parts.length === 1) return parts[0] as string;
+  const or = parts.join(" OR ");
+  return allTerms ? `(${or})` : or;
+}
+
 export function buildFtsMatch(query: string, opts?: MatchBuildOptions): string {
-  const chunks = normalizeThaiInput(query).trim().split(/\s+/).filter(Boolean).slice(0, 8);
+  const chunks = normalizeThaiInput(query)
+    .trim()
+    .split(/\s+/)
+    .filter(Boolean)
+    .slice(0, MAX_QUERY_CHUNKS);
   const filter = filterFor(opts, false);
   const prefix = opts?.prefix === true;
   const stem = opts?.stem === true;
+  const allTerms = opts?.allTerms === true;
   const out: string[] = [];
   for (const chunk of chunks) {
     const thai = hasThai(chunk);
@@ -133,9 +174,9 @@ export function buildFtsMatch(query: string, opts?: MatchBuildOptions): string {
       const vp = buildPhrase(vw, filter, prefix);
       if (vp) parts.push(vp);
     }
-    out.push(parts.join(" OR "));
+    out.push(joinGroup(parts, allTerms));
   }
-  return out.join(" OR ");
+  return out.join(allTerms ? " AND " : " OR ");
 }
 
 /**
@@ -151,12 +192,17 @@ export function buildFtsMatch(query: string, opts?: MatchBuildOptions): string {
  * case-folds) and the loose channel adds nothing.
  */
 export function buildLooseFtsMatch(query: string, opts?: MatchBuildOptions): string {
-  const chunks = normalizeThaiInput(query).trim().split(/\s+/).filter(Boolean).slice(0, 8);
+  const chunks = normalizeThaiInput(query)
+    .trim()
+    .split(/\s+/)
+    .filter(Boolean)
+    .slice(0, MAX_QUERY_CHUNKS);
   // Stopword filtering on the loose side compares in de-accented form, so a
   // tone-mark typo in a stopword still drops the same token the index removed.
   const filter = filterFor(opts, true);
   const prefix = opts?.prefix === true;
   const stem = opts?.stem === true;
+  const allTerms = opts?.allTerms === true;
   const out: string[] = [];
   for (const chunkRaw of chunks) {
     const chunk = looseForm(chunkRaw);
@@ -187,9 +233,9 @@ export function buildLooseFtsMatch(query: string, opts?: MatchBuildOptions): str
       const vp = buildPhrase(vw, filter, prefix);
       if (vp) parts.push(vp);
     }
-    out.push(parts.join(" OR "));
+    out.push(joinGroup(parts, allTerms));
   }
-  return out.join(" OR ");
+  return out.join(allTerms ? " AND " : " OR ");
 }
 
 /** Options accepted by `buildSearchQuery`. `mode` + the MATCH-builder opts. */
@@ -203,7 +249,11 @@ export interface SearchQueryOptions extends MatchBuildOptions {
  * chunk, and return both the strict and the loose MATCH expressions alongside.
  * `mode` is the resolved tone mode (defaults to "both" / strict-first) so an
  * adapter can pick a channel without re-deriving policy. `prefix`/`stopwords`/
- * `stem` are threaded into both match expressions (see `MatchBuildOptions`).
+ * `stem`/`allTerms` are threaded into both match expressions (see
+ * `MatchBuildOptions`). `truncated` is true when the query carried more than
+ * `MAX_QUERY_CHUNKS` chunks — the ones past the cap are dropped from every
+ * expression, so an adapter must surface it rather than let the user read a
+ * silently narrowed result set as a complete one.
  */
 export function buildSearchQuery(
   query: string,
@@ -214,7 +264,10 @@ export function buildSearchQuery(
   const prefix = objectOpts?.prefix;
   const stopwords = objectOpts?.stopwords;
   const stem = objectOpts?.stem;
-  const chunkTexts = normalizeThaiInput(query).trim().split(/\s+/).filter(Boolean).slice(0, 8);
+  const allTerms = objectOpts?.allTerms;
+  const rawChunks = normalizeThaiInput(query).trim().split(/\s+/).filter(Boolean);
+  const truncated = rawChunks.length > MAX_QUERY_CHUNKS;
+  const chunkTexts = rawChunks.slice(0, MAX_QUERY_CHUNKS);
   const chunks: QueryChunk[] = chunkTexts.map((raw) => {
     const thai = hasThai(raw);
     const words = thai ? segmentQueryChunk(raw) : [raw];
@@ -224,8 +277,9 @@ export function buildSearchQuery(
   return {
     mode: tone,
     chunks,
-    match: buildFtsMatch(query, { prefix, stopwords, stem }),
-    looseMatch: buildLooseFtsMatch(query, { prefix, stopwords, stem }),
+    truncated,
+    match: buildFtsMatch(query, { prefix, stopwords, stem, allTerms }),
+    looseMatch: buildLooseFtsMatch(query, { prefix, stopwords, stem, allTerms }),
   };
 }
 
