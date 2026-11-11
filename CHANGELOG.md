@@ -4,6 +4,46 @@ All notable changes to **thai-fts** are documented here. The format is based
 on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- **In-memory adapter** (`thai-fts/engine`) — `createMemoryEngine`, a
+  zero-dependency `ThaiSearchEngine` (`type: "memory"`, registered as
+  `"memory"`) for tests/offline/small data; mirrors the fts5 reference
+  semantics (strict-then-loose merge, dedupe by id, `clampLimit`,
+  caller-owned `filter` hook, verified offsets).
+- **Meilisearch / Elasticsearch reference adapters** —
+  `createMeilisearchEngine` / `createElasticsearchEngine` (also re-exported at
+  the package root), minimal fetch-based `HttpSearchEngine`s (async
+  `add`/`remove`/`search`, static `apiKey` header only, strict+loose
+  two-channel preserved server-side via two docs / two token fields, merged
+  strict-then-loose client-side). **Offsets are NOT supported**; no snippets.
+  Registered as `"meilisearch"` / `"elasticsearch"`. Tested hermetically
+  against a fake `node:http` server.
+- **Opt-in Porter stemming** — `stemEn(word)` in `thai-fts/core` (classic
+  Porter stemmer, ASCII-only, idempotent) plus a symmetric `stem` option on
+  the fts5 and memory adapters (index + query side alike). **OPT-IN,
+  index-changing → rebuild required, default off.**
+- **Multi-occurrence offsets** — with `offsets: true`, fts5 and memory hits
+  now carry up to 3 verified `occurrences: [{ quote, start, end }]` (document
+  order, each `raw.slice(start, end) === quote`; first = primary offset).
+- **Legal / literary seed lists** — `THAI_LEGAL_WORDS`,
+  `THAI_LITERARY_WORDS` (and `THAI_DEFAULT_WORDS` / `THAI_DEFAULT_SYNONYMS`
+  merged with the domain seeds).
+- **Segmenter bridge example** — `examples/segmenter-bridge.mjs` (HTTP bridge
+  to a local PyThaiNLP service + sync dict stub + restore).
+
+### Fixed (QA pass on the FTS5 adapter)
+
+- **BUG-1** — a query consisting only of stopwords no longer crashes
+  `fts5Search` (empty-MATCH guard; an empty channel is skipped).
+- **BUG-2** — `engine.search()` after `close()` now throws the same clear
+  `"Search engine is closed"` error as `add`/`remove`.
+- **BUG-3** — `store.get()` / `store.allRows()` after `close()` now throw a
+  clear `"store is closed"` error instead of leaking
+  `statement has been finalized`.
+
 ## [0.1.0] — 2026-11-11
 
 Initial standalone release, extracted from the `thai-fts` work originally

@@ -108,9 +108,9 @@ Run `thai-fts --help` for the full command reference.
 
 | Subpath | Surface |
 | --- | --- |
-| `thai-fts` (root) | everything below, plus `createFts5Engine` |
+| `thai-fts` (root) | everything below, plus `createFts5Engine`, `createMemoryEngine`, `createMeilisearchEngine`, `createElasticsearchEngine` |
 | `thai-fts/core` | pure lexical core (no DB) |
-| `thai-fts/engine` | search-engine interface + registry |
+| `thai-fts/engine` | search-engine interface + registry + in-memory & reference HTTP adapters |
 | `thai-fts/fts5` | `node:sqlite` FTS5 store / search / schemas |
 
 ### Core — `thai-fts/core`
@@ -167,6 +167,13 @@ PyThaiNLP integration: `node examples/segmenter-bridge.mjs`.
 
 - `resolveToneMode(opts?)` → `"both" | "strict" | "loose"` (default `both`)
 
+**English stemming** (`stem.ts`)
+
+- `stemEn(word)` → `string` — the classic Porter stemmer on ASCII words (Thai
+  tokens pass through unchanged; idempotent). OPT-IN and symmetric: pass
+  `stem: true` to a store/engine so BOTH the indexed payload and the query
+  phrases are stemmed.
+
 **Dictionaries** (`dictionaries.ts`) — registry seam
 
 - `THAI_DEFAULT_WORDS`, `THAI_DEFAULT_SYNONYMS` (dev/tech defaults, always active)
@@ -178,6 +185,9 @@ PyThaiNLP integration: `node examples/segmenter-bridge.mjs`.
 - `ThaiSearchEngine` — `{ add(doc), remove(id), search(query, opts?), close() }`
 - `ThaiSearchDoc`, `ThaiSearchResult`, `ThaiEngineOptions`, `ThaiEngineFactory`
 - `registerEngine(name, factory)`, `createEngine(name, opts?)`, `listEngines()`, `unregisterAllEngines()`
+- `createMemoryEngine(opts?)` → zero-dependency in-memory `ThaiSearchEngine` (tests / offline / small data), registered as `"memory"`
+- `createMeilisearchEngine({ endpoint, index, apiKey?, ... })`, `createElasticsearchEngine({ endpoint, index, apiKey?, ... })` → minimal REFERENCE HTTP adapters (async `add`/`remove`/`search` — see `HttpSearchEngine`), registered as `"meilisearch"` / `"elasticsearch"`
+- `HttpSearchEngine` — the async engine contract the HTTP adapters implement (`close()` stays sync)
 
 ### FTS5 — `thai-fts/fts5`
 
@@ -220,6 +230,28 @@ or re-open the file):
 const engine = createFts5Engine({ memory: true, stopwords: true });
 engine.add({ id: "x", body: "การติดตั้งโปรแกรม" });
 engine.search("การติดตั้ง"); // matches — "การ" is dropped on both sides
+```
+
+**Multi-occurrence offsets** — with `offsets: true`, every hit also carries up
+to 3 verified `occurrences: [{ quote, start, end }]` (document order, each
+`raw.slice(start, end) === quote`); the first entry equals the primary
+`quote`/`start`/`end`. Useful for literature/legal citing:
+
+```js
+const [hit] = fts5Search(store, "ติดตั้ง", { offsets: true });
+// 3 occurrences in the doc → hit.occurrences.length === 3
+```
+
+**English stemming** — OPT-IN and symmetric: `stem: true` runs `stemEn` (classic
+Porter, ASCII-only — Thai tokens are untouched) on the indexed payload AND the
+query phrases, so `running` matches `run`. Toggling it changes the indexed
+payload → an existing on-disk database must be rebuilt (or documents re-added
+for memory/HTTP engines). Default off:
+
+```js
+const engine = createFts5Engine({ memory: true, stem: true });
+engine.add({ id: "x", body: "we are running the tests" });
+engine.search("run"); // matches — both sides stem to "run"
 ```
 
 ## Tone policy
@@ -298,21 +330,39 @@ specific segmented term to a different fixed token (`{ term, fixed }`).
 `THAI_DEFAULT_WORDS` (1,368 entries incl. legal/literary seeds) and
 `THAI_DEFAULT_SYNONYMS` (38 pairs) are always active underneath.
 
-## Adapters roadmap
+## Adapters
 
-`ThaiSearchEngine` is a minimal pluggable contract; the registry is the seam for
-future backends. Today: `fts5` (reference, `node:sqlite`). Planned next:
+`ThaiSearchEngine` is a minimal pluggable contract; the registry is the seam
+for backends. Shipped today:
 
-- **Meilisearch** / **Elasticsearch** — map `add`/`remove`/`search` over their REST APIs
-- **In-memory** — a small JS index for tests and offline tooling
-- **Vector / hybrid** — embeddings appended as a scoring layer, keeping the same interface
+- **`fts5`** and **`memory`** — the fully-tested LOCAL engines: the FTS5
+  reference adapter on `node:sqlite`, and the zero-dependency in-memory
+  `ThaiSearchEngine` (tests, offline, small data). Synchronous API, verified
+  offsets, full opt-in feature set.
+- **`meilisearch`** and **`elasticsearch`** — minimal REFERENCE HTTP adapters:
+  fetch-based (Node 18+, no SDK), **async** `add`/`remove`/`search`
+  (`HttpSearchEngine`; `close()` stays sync), one static `apiKey` header
+  (Meilisearch `Authorization: Bearer <key>`, Elasticsearch
+  `Authorization: Basic base64(apiKey)`). The strict+loose two-channel is
+  preserved SERVER-SIDE (two documents / two token fields) and merged
+  strict-then-loose client-side. **Offsets are NOT supported** (no
+  verified `quote`/`start`/`end`) and hits carry no snippet. Treat them as
+  "works with a live server" starting points, not tuned integrations.
 
 ```js
-import { registerEngine, createEngine } from "thai-fts";
+import { createMeilisearchEngine, createElasticsearchEngine } from "thai-fts";
 
-registerEngine("meilisearch", (opts) => new MeiliEngine(opts));
-const engine = createEngine("meilisearch", { host: "http://localhost:7700" });
+const meili = createMeilisearchEngine({ endpoint: "http://localhost:7700", index: "docs", apiKey: "key" });
+await meili.add({ id: 1, title: "คู่มือ", body: "ติดตั้งโปรแกรม" });
+await meili.search("ติดตั้ง"); // ThaiSearchResult[] (async)
+meili.close();
+
+const es = createElasticsearchEngine({ endpoint: "http://localhost:9200", index: "docs" });
+// same surface: add / remove / search (async) / close
 ```
+
+Still on the roadmap: **Vector / hybrid** — embeddings appended as a scoring
+layer, keeping the same interface.
 
 ## Zero runtime dependencies
 

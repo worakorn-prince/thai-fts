@@ -6,6 +6,7 @@
 export * from "./segment.js";
 export * from "./synonyms.js";
 export * from "./stopwords.js";
+export * from "./stem.js";
 export * from "./query.js";
 export * from "./dictionaries.js";
 export * from "./seeds/legal.js";

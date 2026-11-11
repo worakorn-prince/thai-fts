@@ -23,12 +23,12 @@
  * ```
  */
 import { DatabaseSync } from "node:sqlite";
-import { expandIndexedText } from "../../core/synonyms.js";
-import { looseForm, segmentForIndex } from "../../core/segment.js";
-import { applyStopwords, THAI_DEFAULT_STOPWORDS } from "../../core/stopwords.js";
+import { looseForm } from "../../core/segment.js";
+import { THAI_DEFAULT_STOPWORDS } from "../../core/stopwords.js";
 import { registerThaiDictionary } from "../../core/dictionaries.js";
 import type { ThaiDictionaryDef } from "../../core/types.js";
 import type { ThaiSearchDoc } from "../engine.js";
+import { buildIndexPayload } from "../_align.js";
 import { buildLooseSchema, buildStrictSchema } from "./schema.js";
 
 /** Options for opening a memory- or file-backed FTS5 store. */
@@ -54,6 +54,13 @@ export interface OpenFts5StoreOptions {
    * this changes the indexed payload — existing on-disk databases must be
    * rebuilt** (re-index via `rebuild()` or recreate the file). Default off. */
   stopwords?: boolean | readonly string[];
+  /** Opt-in English Porter stemming (`stemEn`) on ASCII tokens of the indexed
+   * payload (Thai tokens pass through unchanged). Symmetric with the
+   * query-side `MatchBuildOptions.stem`: search threads `store.stem` into the
+   * MATCH builders automatically. **Enabling this changes the indexed payload
+   * — existing on-disk databases must be rebuilt** (re-index via `rebuild()`
+   * or recreate the file). Default off. */
+  stem?: boolean;
 }
 
 /** A row of raw document text as returned by the store. */
@@ -73,6 +80,9 @@ export interface Fts5Store {
   /** The resolved stopword list this store was opened with (empty = off).
    * Search reads it to keep query-side filtering symmetric with the index. */
   readonly stopwords: readonly string[];
+  /** Whether opt-in English Porter stemming was enabled at open time.
+   * Search reads it so the query-side `stem` stays symmetric with the index. */
+  readonly stem: boolean;
   /** Index (or re-index) a document on both channels; replaces any prior row
    * with the same id atomically. Uses registered Thai dictionaries if any. */
   add(doc: ThaiSearchDoc): void;
@@ -128,9 +138,10 @@ export function openFts5Store(opts: OpenFts5StoreOptions = {}): Fts5Store {
   for (const pragma of DEFAULT_PRAGMAS) db.exec(pragma);
   if (!isMemory) db.exec("PRAGMA journal_mode = WAL");
 
-  // Prefix indexes + stopword list are fixed at open time. Applying stopwords
-  // changes the indexed payload, so documents must be re-indexed (rebuild) if
-  // this option toggles on an existing on-disk database.
+  // Prefix indexes + stopword list + stemming are fixed at open time. Applying
+  // stopwords or stemming changes the indexed payload, so documents must be
+  // re-indexed (rebuild) if either option toggles on an existing on-disk
+  // database.
   const prefix = opts.prefix;
   const stopwords: readonly string[] =
     opts.stopwords === undefined || opts.stopwords === false
@@ -138,6 +149,7 @@ export function openFts5Store(opts: OpenFts5StoreOptions = {}): Fts5Store {
       : opts.stopwords === true
         ? THAI_DEFAULT_STOPWORDS
         : [...opts.stopwords];
+  const stem = opts.stem === true;
 
   db.exec(DOCUMENTS_DDL);
   db.exec(buildStrictSchema(prefix));
@@ -183,15 +195,15 @@ export function openFts5Store(opts: OpenFts5StoreOptions = {}): Fts5Store {
     const title = String(doc.title ?? "");
     const body = String(doc.body ?? "");
     // Index-time transform chain (mirrors the core's documented pipeline):
-    // segmentThai -> expand synonyms -> stopword filter (when enabled) -> store
-    // the mark-aware payload strict, and looseForm of THAT SAME payload on the
-    // loose channel, so query and index sides always agree. expandIndexedText,
-    // applyStopwords and looseForm are byte idempotent, so re-indexing an
-    // already-indexed id is a fixed point. When stopwords is empty (default)
-    // applyStopwords returns the payload verbatim, keeping the pipeline
-    // byte-identical to the no-stopword path.
-    const strictTitle = applyStopwords(expandIndexedText(segmentForIndex(title)), stopwords);
-    const strictBody = applyStopwords(expandIndexedText(segmentForIndex(body)), stopwords);
+    // segmentThai -> expand synonyms -> stopword filter (when enabled) ->
+    // opt-in ASCII stem (when enabled) -> store the mark-aware payload strict,
+    // and looseForm of THAT SAME payload on the loose channel, so query and
+    // index sides always agree. buildIndexPayload wraps the first three steps
+    // (byte-identical to the legacy path when stopwords is empty and stem is
+    // off), and the whole chain is byte idempotent, so re-indexing an
+    // already-indexed id is a fixed point.
+    const strictTitle = buildIndexPayload(title, stopwords, stem);
+    const strictBody = buildIndexPayload(body, stopwords, stem);
     delStrict.run(id);
     delLoose.run(id);
     upsertDoc.run(id, isNum, title, body);
@@ -213,6 +225,7 @@ export function openFts5Store(opts: OpenFts5StoreOptions = {}): Fts5Store {
     type: "fts5",
     db,
     stopwords,
+    stem,
     add(doc: ThaiSearchDoc): void {
       assertOpen();
       db.exec("BEGIN");

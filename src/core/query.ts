@@ -36,10 +36,16 @@
  *    stopwords is dropped entirely. The strict channel uses exact
  *    (`filterStopwords`) comparison; the loose channel uses the de-accented
  *    (`filterStopwordsLoose`) comparison.
+ *  - `stem` (default off): opt-in English Porter stemming (`stemEn`) applied
+ *    to ASCII word tokens only — Thai tokens pass through unchanged. Mirrors
+ *    the store-level `stem` option so index and query stay symmetric.
+ *    **Enabling it changes the indexed payload: existing indexes must be
+ *    rebuilt after toggling it.** Default off keeps the query byte-identical.
  */
 import { hasThai, looseForm, normalizeThaiInput, segmentQueryChunk } from "./segment.js";
 import { expandChunkSynonyms } from "./synonyms.js";
 import { filterStopwords, filterStopwordsLoose } from "./stopwords.js";
+import { stemEn } from "./stem.js";
 import type { BuiltQuery, QueryChunk, ToneMode } from "./types.js";
 
 /** Shared options for the MATCH builders. */
@@ -48,12 +54,25 @@ export interface MatchBuildOptions {
   prefix?: boolean;
   /** Stopword tokens removed from the word lists before phrase building. */
   stopwords?: readonly string[];
+  /** Opt-in English Porter stemming (`stemEn`) on ASCII word tokens only
+   * (Thai tokens pass through unchanged). Symmetric with the store-level
+   * `stem` option: enabling it changes the indexed payload, so existing
+   * indexes must be rebuilt. Default off. */
+  stem?: boolean;
 }
 
 /** Token-list filter derived from `MatchBuildOptions.stopwords` (may be
  * undefined = no filtering). Kept as a function so the loose builder can use
  * the de-accented comparison without double-filtering. */
 type FilterFn = (tokens: readonly string[]) => string[];
+
+/** Opt-in Porter stem applied per token: ASCII words go through `stemEn`
+ * (which lowercases them — FTS5's unicode61 lowercases both sides anyway),
+ * Thai tokens pass through unchanged. Identity (no copy) when `stem` is off. */
+function stemWords(words: readonly string[], stem: boolean): readonly string[] {
+  if (!stem) return words;
+  return words.map((w) => (hasThai(w) ? w : stemEn(w)));
+}
 
 function filterFor(opts: MatchBuildOptions | undefined, loose: boolean): FilterFn | undefined {
   const sw = opts?.stopwords;
@@ -86,10 +105,11 @@ export function buildFtsMatch(query: string, opts?: MatchBuildOptions): string {
   const chunks = normalizeThaiInput(query).trim().split(/\s+/).filter(Boolean).slice(0, 8);
   const filter = filterFor(opts, false);
   const prefix = opts?.prefix === true;
+  const stem = opts?.stem === true;
   const out: string[] = [];
   for (const chunk of chunks) {
     const thai = hasThai(chunk);
-    const words = thai ? segmentQueryChunk(chunk) : [chunk];
+    const words = stemWords(thai ? segmentQueryChunk(chunk) : [chunk], stem);
     const base = buildPhrase(words, filter, prefix);
     if (!base) continue;
     // A Thai chunk becomes a single ordered FTS5 phrase, NEVER OR-expanded here
@@ -109,7 +129,7 @@ export function buildFtsMatch(query: string, opts?: MatchBuildOptions): string {
     }
     const parts: string[] = [base];
     for (const v of variants.slice(1)) {
-      const vw = hasThai(v) ? segmentQueryChunk(v) : [v];
+      const vw = stemWords(hasThai(v) ? segmentQueryChunk(v) : [v], stem);
       const vp = buildPhrase(vw, filter, prefix);
       if (vp) parts.push(vp);
     }
@@ -136,18 +156,26 @@ export function buildLooseFtsMatch(query: string, opts?: MatchBuildOptions): str
   // tone-mark typo in a stopword still drops the same token the index removed.
   const filter = filterFor(opts, true);
   const prefix = opts?.prefix === true;
+  const stem = opts?.stem === true;
   const out: string[] = [];
   for (const chunkRaw of chunks) {
     const chunk = looseForm(chunkRaw);
     const thai = hasThai(chunk);
-    const words = thai ? segmentQueryChunk(chunk) : [chunk];
+    // With `stem` on, the ASCII-chunk synonym expansion runs on the STEMMED
+    // chunk: the unstemmed index tokens survive the expandIndexedText pass
+    // verbatim (e.g. "install" stays in the payload alongside its stemmed
+    // form "instal"), so an unstemmed whole-chunk lookup must stay available
+    // or a stemmed query could miss docs whose only copy is the unstemmed
+    // token. Thai chunks are untouched by the stem either way.
+    const asciiChunk = stem && !thai ? stemEn(chunk) : chunk;
+    const words = stemWords(thai ? segmentQueryChunk(chunk) : [chunk], stem);
     const base = buildPhrase(words, filter, prefix);
     if (!base) continue;
     if (thai) {
       out.push(base);
       continue;
     }
-    const variants = expandChunkSynonyms(chunk);
+    const variants = expandChunkSynonyms(asciiChunk);
     if (variants.length <= 1) {
       out.push(base);
       continue;
@@ -155,7 +183,7 @@ export function buildLooseFtsMatch(query: string, opts?: MatchBuildOptions): str
     const parts: string[] = [base];
     for (const v of variants.slice(1)) {
       const vl = looseForm(v);
-      const vw = hasThai(vl) ? segmentQueryChunk(vl) : [vl];
+      const vw = stemWords(hasThai(vl) ? segmentQueryChunk(vl) : [vl], stem);
       const vp = buildPhrase(vw, filter, prefix);
       if (vp) parts.push(vp);
     }
@@ -174,8 +202,8 @@ export interface SearchQueryOptions extends MatchBuildOptions {
  * into its whitespace-delimited chunks (max 8, like the builders), analyze each
  * chunk, and return both the strict and the loose MATCH expressions alongside.
  * `mode` is the resolved tone mode (defaults to "both" / strict-first) so an
- * adapter can pick a channel without re-deriving policy. `prefix`/`stopwords`
- * are threaded into both match expressions (see `MatchBuildOptions`).
+ * adapter can pick a channel without re-deriving policy. `prefix`/`stopwords`/
+ * `stem` are threaded into both match expressions (see `MatchBuildOptions`).
  */
 export function buildSearchQuery(
   query: string,
@@ -185,6 +213,7 @@ export function buildSearchQuery(
   const objectOpts = typeof opts === "object" && opts !== null ? (opts as SearchQueryOptions) : undefined;
   const prefix = objectOpts?.prefix;
   const stopwords = objectOpts?.stopwords;
+  const stem = objectOpts?.stem;
   const chunkTexts = normalizeThaiInput(query).trim().split(/\s+/).filter(Boolean).slice(0, 8);
   const chunks: QueryChunk[] = chunkTexts.map((raw) => {
     const thai = hasThai(raw);
@@ -195,8 +224,8 @@ export function buildSearchQuery(
   return {
     mode: tone,
     chunks,
-    match: buildFtsMatch(query, { prefix, stopwords }),
-    looseMatch: buildLooseFtsMatch(query, { prefix, stopwords }),
+    match: buildFtsMatch(query, { prefix, stopwords, stem }),
+    looseMatch: buildLooseFtsMatch(query, { prefix, stopwords, stem }),
   };
 }
 

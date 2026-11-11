@@ -97,9 +97,9 @@ thai-fts --json search "ติดตั้ง" --db db.sqlite          # { ok: t
 
 | Subpath | เนื้อหา |
 | --- | --- |
-| `thai-fts` (root) | ทุกอย่างด้านล่าง บวก `createFts5Engine` |
+| `thai-fts` (root) | ทุกอย่างด้านล่าง บวก `createFts5Engine`, `createMemoryEngine`, `createMeilisearchEngine`, `createElasticsearchEngine` |
 | `thai-fts/core` | core ภาษาไทยล้วน (ไม่ต้องใช้ DB) |
-| `thai-fts/engine` | อินเทอร์เฟซเอนจินค้นหา + ทะเบียน |
+| `thai-fts/engine` | อินเทอร์เฟซเอนจินค้นหา + ทะเบียน + อะแดปเตอร์ in-memory และ HTTP แบบ reference |
 | `thai-fts/fts5` | store / search / schema FTS5 บน `node:sqlite` |
 
 ### Core — `thai-fts/core`
@@ -133,6 +133,10 @@ thai-fts --json search "ติดตั้ง" --db db.sqlite          # { ok: t
 
 - `resolveToneMode(opts?)` → `"both" | "strict" | "loose"` (ค่าเริ่มต้น `both`)
 
+**การย่อคำอังกฤษ** (`stem.ts`)
+
+- `stemEn(word)` → `string` — อัลกอริทึม Porter stemmer คลาสสิกสำหรับคำ ASCII (คำไทยผ่านตรงไปโดยไม่เปลี่ยน; ทำซ้ำได้ค่าเดิม = idempotent) เป็น OPT-IN แบบสมมาตร: ส่ง `stem: true` ให้ store/engine เพื่อให้ทั้ง payload ในดัชนีและคำค้นถูกย่อด้วย
+
 **พจนานุกรม** (`dictionaries.ts`) — ช่องต่อทะเบียน
 
 - `THAI_DEFAULT_WORDS`, `THAI_DEFAULT_SYNONYMS` (ค่าเริ่มต้นสาย dev/tech ที่เปิดใช้เสมอ)
@@ -144,6 +148,9 @@ thai-fts --json search "ติดตั้ง" --db db.sqlite          # { ok: t
 - `ThaiSearchEngine` — `{ add(doc), remove(id), search(query, opts?), close() }`
 - `ThaiSearchDoc`, `ThaiSearchResult`, `ThaiEngineOptions`, `ThaiEngineFactory`
 - `registerEngine(name, factory)`, `createEngine(name, opts?)`, `listEngines()`, `unregisterAllEngines()`
+- `createMemoryEngine(opts?)` → `ThaiSearchEngine` แบบ in-memory ที่ไม่มี dependencies เลย (สำหรับเทสต์/ออฟไลน์/ข้อมูลเล็ก) ลงทะเบียนเป็น `"memory"`
+- `createMeilisearchEngine({ endpoint, index, apiKey?, ... })`, `createElasticsearchEngine({ endpoint, index, apiKey?, ... })` → อะแดปเตอร์ HTTP แบบ reference ขั้นต่ำ (`add`/`remove`/`search` เป็น async — ดู `HttpSearchEngine`) ลงทะเบียนเป็น `"meilisearch"` / `"elasticsearch"`
+- `HttpSearchEngine` — คอนแทรกต์เอนจินแบบ async ที่อะแดปเตอร์ HTTP อิมพลีเมนต์ (`close()` ยังเป็น sync)
 
 ### FTS5 — `thai-fts/fts5`
 
@@ -180,6 +187,21 @@ fts5Search(store, "ติดตั้ง", { titleWeight: 2 });
 const engine = createFts5Engine({ memory: true, stopwords: true });
 engine.add({ id: "x", body: "การติดตั้งโปรแกรม" });
 engine.search("การติดตั้ง"); // เจอ — "การ" ถูกตัดทั้งสองฝั่ง
+```
+
+**multi-occurrence offsets** — เมื่อใช้ `offsets: true` แต่ละ hit จะได้ `occurrences: [{ quote, start, end }]` ที่ตรวจสอบแล้วสูงสุด 3 รายการ (ตามลำดับในเอกสาร แต่ละรายการ `raw.slice(start, end) === quote`) รายการแรกเท่ากับ `quote`/`start`/`end` หลัก เหมาะสำหรับการอ้างอิงงานวิชาการ/กฎหมาย:
+
+```js
+const [hit] = fts5Search(store, "ติดตั้ง", { offsets: true });
+// เอกสารมี "ติดตั้ง" 3 ครั้ง → hit.occurrences.length === 3
+```
+
+**การย่อคำอังกฤษ (stemming)** — OPT-IN แบบสมมาตร: `stem: true` รัน `stemEn` (Porter คลาสสิก เฉพาะ ASCII — คำไทยไม่ถูกแตะ) ทั้งฝั่ง payload ในดัชนีและฝั่งคำค้น ทำให้ `running` ตรงกับ `run` การสลับตัวเลือกนี้เปลี่ยน payload ในดัชนี → ฐานข้อมูลไฟล์ที่มีอยู่ต้อง rebuild (หรือเพิ่มเอกสารใหม่สำหรับ memory/HTTP engine) ปิดตามค่าเริ่มต้น:
+
+```js
+const engine = createFts5Engine({ memory: true, stem: true });
+engine.add({ id: "x", body: "we are running the tests" });
+engine.search("run"); // เจอ — ทั้งสองฝั่งถูกย่อเป็น "run"
 ```
 
 ## นโยบายวรรณยุกต์
@@ -237,18 +259,24 @@ registerThaiDictionary({ id: "legal-app", words });
 
 ## แผนงานอะแดปเตอร์
 
-`ThaiSearchEngine` คือคอนแทรกต์แบบ pluggable ขั้นต่ำ และทะเบียนคือช่องต่อสำหรับแบ็กเอนด์ในอนาคต ปัจจุบัน: `fts5` (อ้างอิง, `node:sqlite`) ต่อไปตามแผน:
+`ThaiSearchEngine` คือคอนแทรกต์แบบ pluggable ขั้นต่ำ และทะเบียนคือช่องต่อสำหรับแบ็กเอนด์ สิ่งที่มีอยู่ในปัจจุบัน:
 
-- **Meilisearch** / **Elasticsearch** — จับ `add`/`remove`/`search` เข้ากับ REST API ของมัน
-- **In-memory** — ดัชนี JS ขนาดเล็กสำหรับเทสต์และเครื่องมือออฟไลน์
-- **Vector / hybrid** — ใส่ embeddings เพิ่มเป็นชั้นให้คะแนน โดยยังใช้อินเทอร์เฟซเดิม
+- **`fts5`** และ **`memory`** — เอนจิน LOCAL ที่ทดสอบครบทั้งชุด: FTS5 reference adapter บน `node:sqlite` และ `ThaiSearchEngine` แบบ in-memory ที่ไม่มี dependencies เลย (สำหรับเทสต์/ออฟไลน์/ข้อมูลเล็ก) API แบบ synchronous รองรับ offsets ที่ตรวจสอบได้ และฟีเจอร์ opt-in ครบชุด
+- **`meilisearch`** และ **`elasticsearch`** — อะแดปเตอร์ HTTP แบบ reference ขั้นต่ำ: ใช้ fetch ของ Node (≥ 18, ไม่ต้องใช้ SDK) `add`/`remove`/`search` เป็น **async** (`HttpSearchEngine`; `close()` ยังเป็น sync) ใช้แค่ header `apiKey` แบบ static (Meilisearch `Authorization: Bearer <key>`, Elasticsearch `Authorization: Basic base64(apiKey)`) ช่อง strict+loose สองช่องถูกเก็บไว้ฝั่งเซิร์ฟเวอร์ (เอกสารสองชิ้น / field token สอง field) และมารวม strict-then-loose ฝั่งไคลเอนต์ **offsets ไม่รองรับ** (ไม่มี `quote`/`start`/`end` ที่ตรวจสอบแล้ว) และ hit ไม่มี snippet ควรใช้ในฐานะจุดเริ่มต้นที่ "ทำงานกับเซิร์ฟเวอร์จริงได้" ไม่ใช่การอินทิเกรตที่ปรับแต่งแล้ว
 
 ```js
-import { registerEngine, createEngine } from "thai-fts";
+import { createMeilisearchEngine, createElasticsearchEngine } from "thai-fts";
 
-registerEngine("meilisearch", (opts) => new MeiliEngine(opts));
-const engine = createEngine("meilisearch", { host: "http://localhost:7700" });
+const meili = createMeilisearchEngine({ endpoint: "http://localhost:7700", index: "docs", apiKey: "key" });
+await meili.add({ id: 1, title: "คู่มือ", body: "ติดตั้งโปรแกรม" });
+await meili.search("ติดตั้ง"); // ThaiSearchResult[] (async)
+meili.close();
+
+const es = createElasticsearchEngine({ endpoint: "http://localhost:9200", index: "docs" });
+// พื้นผิวเดียวกัน: add / remove / search (async) / close
 ```
+
+ยังเหลือในแผน: **Vector / hybrid** — ใส่ embeddings เพิ่มเป็นชั้นให้คะแนน โดยยังใช้อินเทอร์เฟซเดิม
 
 ## ไม่มี dependencies ตอนรันไทม์
 

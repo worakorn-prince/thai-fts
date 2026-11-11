@@ -50,6 +50,11 @@ export interface ThaiSearchResult {
   start?: number;
   /** Raw UTF-16 index just past the matched text. */
   end?: number;
+  /** Verified raw occurrences of the matched term when `offsets` is requested:
+   * up to 3 `{ quote, start, end }` entries in document order, each satisfying
+   * `slice(rawText, start, end) === quote`. The first entry equals the primary
+   * `quote`/`start`/`end`. Omitted when no verified occurrence exists. */
+  occurrences?: Array<{ quote: string; start: number; end: number }>;
   /** Adapter-specific diagnostics such as `{ method, channel }`. */
   meta?: Record<string, unknown>;
 }

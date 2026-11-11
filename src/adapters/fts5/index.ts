@@ -34,7 +34,7 @@ export type { Fts5SearchOptions, Fts5Candidate } from "./search.js";
  * Thai dictionaries at open. `prefix` doubles as the STORE option when it is a
  * number[] (FTS5 prefix-index lengths baked into the tables) and as the SEARCH
  * option (autocomplete `*` matching) when it is a boolean — pass both if you
- * want prefix-indexed autocomplete. `stopwords` is store-level only. */
+ * want prefix-indexed autocomplete. `stopwords`/`stem` are store-level only. */
 export interface Fts5EngineOptions extends Omit<ThaiEngineOptions, "prefix"> {
   path?: string;
   memory?: boolean;
@@ -47,6 +47,12 @@ export interface Fts5EngineOptions extends Omit<ThaiEngineOptions, "prefix"> {
    * it changes the indexed payload — rebuild on-disk databases after toggling.
    * Default off. */
   stopwords?: boolean | readonly string[];
+  /** Opt-in symmetric English Porter stemming (store-level): `stemEn` is
+   * applied to ASCII tokens of the indexed payload (Thai tokens unchanged) and
+   * `search()` threads it into the query-side MATCH builders automatically.
+   * **OPT-IN: enabling it changes the indexed payload — existing on-disk
+   * databases must be rebuilt after toggling.** Default off. */
+  stem?: boolean;
 }
 
 /**
@@ -62,6 +68,7 @@ export function createFts5Engine(opts: Fts5EngineOptions = {}): ThaiSearchEngine
     dictionaries: opts.dictionaries,
     prefix: Array.isArray(opts.prefix) ? opts.prefix : undefined,
     stopwords: opts.stopwords,
+    stem: opts.stem === true,
   });
   const base: ThaiEngineOptions = {};
   if (opts.tone !== undefined) base.tone = opts.tone;
