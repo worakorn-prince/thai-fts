@@ -4,6 +4,22 @@ All notable changes to **thai-fts** are documented here. The format is based
 on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.3.0] — 2026-11-14
+
+### Added
+
+- **HTTP client adapter** — `createThaiFtsServerEngine` (engine type
+  `thaifts-server`, exported from `thai-fts/engine`): a thin, zero-dependency
+  `fetch` client that points a `ThaiAsyncEngine` at any thai-fts REST server
+  (the v0.2.0 protocol). `add` / `addMany` / `update` (upsert) / `remove` /
+  `search` / `searchWithMeta` / `close` with numeric-id round-trips preserved,
+  per-call `tone` / `limit` merged over the client defaults, `apiKey` sent as
+  `Authorization: Bearer`, and an optional `engine` option that targets
+  `/engines/<name>/...` explicitly instead of the shorthand routes.
+- **Integration guide** — `docs/http-client.md` documents endpoints, options,
+  error semantics (including the POST `limit` → `500` server caveat) and a
+  worker/mcp integration recipe.
+
 ## [0.2.0] — 2026-11-14
 
 ### Added

@@ -21,7 +21,7 @@ import type { ThaiSearchEngine, ThaiSearchResult } from "./adapters/engine.js";
 import type { ToneMode } from "./core/types.js";
 import { createServer } from "./server/index.js";
 
-const USAGE = `thai-fts v0.2.0 - tone-aware Thai full-text search for Node (zero dependencies)
+const USAGE = `thai-fts v0.3.0 - tone-aware Thai full-text search for Node (zero dependencies)
 
 Usage:
   thai-fts <command> [<text>] [options]
