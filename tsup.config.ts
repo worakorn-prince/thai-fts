@@ -7,6 +7,8 @@ export default defineConfig({
     "src/core/index.ts",
     "src/engine/index.ts",
     "src/fts5/index.ts",
+    "src/server/index.ts",
+    "src/server/main.ts",
   ],
   format: ["esm", "cjs"],
   dts: true,

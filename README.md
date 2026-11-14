@@ -116,6 +116,72 @@ thai-fts --json search "ติดตั้ง" --db db.sqlite          # { ok: t
 
 Run `thai-fts --help` for the full command reference.
 
+## REST API server
+
+`thai-fts serve` starts a zero-dependency HTTP wrapper around any registered
+engine, so other processes (an MCP server, a web UI, a worker) can search over
+HTTP instead of importing the library.
+
+```sh
+thai-fts serve --port 3000 --engine memory --engine fts5:memory
+# [thai-fts-server] Listening on http://0.0.0.0:3000
+# [thai-fts-server] Engines: fts5:memory, memory
+# [thai-fts-server] Default engine: memory
+```
+
+`THAI_FTS_ENGINES=memory,fts5:file` works too. The first sync engine (or
+`--default <name>`) becomes the default.
+
+| Method | Path | Description |
+| --- | --- | --- |
+| `GET` | `/health` | `{ ok, engines, default, version }` |
+| `POST` | `/add` | Add or upsert one document |
+| `POST` | `/addMany` | Add or upsert an array of documents |
+| `PUT` | `/update` | Replace one document |
+| `DELETE` | `/remove/:id` | Remove a document by id |
+| `GET` | `/search?q=...` | Search with query-string options |
+| `POST` | `/search` | Search with a JSON options body |
+| `POST` | `/searchWithMeta` | Search plus the `truncated` flag |
+| `POST` | `/close` | Close the engine (idempotent) |
+
+Every path also exists under `/engines/:engine/...`. The engine is resolved in
+this order: path parameter → `X-Thai-Fts-Engine` header → `engine` query
+parameter → default engine.
+
+```sh
+curl -X POST localhost:3000/engines/memory/add \
+  -H 'content-type: application/json' \
+  -d '{"id":"g1","title":"คู่มือติดตั้ง","body":"ขั้นตอนการติดตั้งโปรแกรม"}'
+# {"ok":true,"id":"g1"}
+
+curl 'localhost:3000/search?q=%E0%B8%95%E0%B8%B4%E0%B8%94%E0%B8%95%E0%B8%B1%E0%B9%89%E0%B8%87'
+# {"ok":true,"hits":[{"id":"g1","rank":1,"snippet":"...","meta":{"method":"memory","channel":"strict"}}]}
+```
+
+Programmatic use:
+
+```ts
+import { createServer } from "thai-fts/server";
+
+const server = await createServer({
+  port: 3000,
+  host: "127.0.0.1",
+  engines: [
+    { name: "memory", factory: "createMemoryEngine" },
+    { name: "fts5:memory", factory: "createFts5Engine", options: { memory: true } },
+  ],
+  defaultEngine: "memory",
+});
+
+console.log(server.address());
+await server.close(); // releases every engine
+```
+
+Request bodies must be JSON (`400` otherwise) and are capped at 1 MiB (`413`).
+Responses carry `Access-Control-Allow-Origin: *`; `OPTIONS` returns `204` for
+preflight and a wrong method on a known path returns `405` with `Allow`.
+`SIGINT`/`SIGTERM` close the HTTP server and every engine before exit.
+
 ## API summary
 
 | Subpath | Surface |
@@ -124,6 +190,7 @@ Run `thai-fts --help` for the full command reference.
 | `thai-fts/core` | pure lexical core (no DB) |
 | `thai-fts/engine` | search-engine interface + registry + in-memory & reference HTTP adapters |
 | `thai-fts/fts5` | `node:sqlite` FTS5 store / search / schemas |
+| `thai-fts/server` | zero-dependency REST API server (`createServer`) |
 
 ### Core — `thai-fts/core`
 

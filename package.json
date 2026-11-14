@@ -1,6 +1,6 @@
 {
   "name": "thai-fts",
-  "version": "0.1.1",
+  "version": "0.2.0",
   "description": "tone-aware Thai full-text search with zero runtime dependencies",
   "author": "worakorn-prince",
   "license": "MIT",
@@ -33,6 +33,11 @@
       "import": "./dist/fts5/index.js",
       "require": "./dist/fts5/index.cjs"
     },
+    "./server": {
+      "types": "./dist/server/index.d.ts",
+      "import": "./dist/server/index.js",
+      "require": "./dist/server/index.cjs"
+    },
     "./package.json": "./package.json"
   },
   "files": [
@@ -56,7 +61,8 @@
     "tokenizer",
     "thai-language",
     "sqlite",
-    "fts5"
+    "fts5",
+    "rest-api"
   ],
   "engines": {
     "node": ">=22.13.0"
@@ -69,7 +75,8 @@
     "benchmark:quality": "npm run build && node benchmark/quality/run.mjs",
     "benchmark:perf": "npm run build && node benchmark/perf/diagnose.mjs",
     "pack:check": "npm pack --dry-run",
-    "prepublishOnly": "npm run build && npm test"
+    "prepublishOnly": "npm run build && npm test",
+    "server": "node dist/server/main.js"
   },
   "devDependencies": {
     "@types/node": "^22.0.0",

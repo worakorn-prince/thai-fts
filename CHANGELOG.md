@@ -4,6 +4,30 @@ All notable changes to **thai-fts** are documented here. The format is based
 on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.2.0] — 2026-11-14
+
+### Added
+
+- **REST API server** — `thai-fts serve` and the `thai-fts/server` subpath wrap
+  any registered engine in a zero-dependency `node:http` server: `/health`,
+  `/add`, `/addMany`, `/update`, `/remove/:id`, `/search` (GET + POST),
+  `/searchWithMeta`, `/close`, each also under `/engines/:engine/...`.
+  Engine selection is path parameter → `X-Thai-Fts-Engine` header → `engine`
+  query parameter → default engine. Multi-engine registry (memory, fts5 and
+  user-registered factories), CORS including `OPTIONS` preflight, 1 MiB body
+  cap (`413`), `405` with an `Allow` header for wrong methods, and graceful
+  `SIGINT`/`SIGTERM` shutdown that closes every engine.
+- `npm run server` script and the `./server` package export.
+
+### Fixed
+
+- CLI `serve` no longer crashes with `ERR_INVALID_ARG_TYPE` (a promise was
+  assigned directly to `process.exitCode`).
+- The server no longer auto-starts inside the CLI bundle. Direct-run entry
+  lives in its own `dist/server/main.js`, so `thai-fts loose "..."` and every
+  other one-shot command exits immediately again.
+- The exported `version` constant now matches `package.json`.
+
 ## [0.1.1] — 2026-11-12
 
 ### Changed

@@ -26,6 +26,8 @@
  */
 import type { ToneMode } from "../core/types.js";
 
+export type { ToneMode };
+
 /** A document an engine can index. Only `id`, `title`, `body` are read by the
  * FTS5 adapter today; extra keys are carried for future adapters. */
 export interface ThaiSearchDoc {

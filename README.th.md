@@ -105,6 +105,64 @@ thai-fts --json search "ติดตั้ง" --db db.sqlite          # { ok: t
 
 รัน `thai-fts --help` เพื่อดูคำสั่งทั้งหมด
 
+## REST API server (เซิร์ฟเวอร์ HTTP)
+
+`thai-fts serve` เปิด HTTP wrapper ที่ไม่ต้องใช้ dependency ภายนอก ครอบเอนจินที่ลงทะเบียนไว้ ทำให้โปรเซสอื่น (เช่น MCP server, เว็บ UI, worker) ค้นหาผ่าน HTTP ได้โดยไม่ต้อง import ไลบรารี
+
+```sh
+thai-fts serve --port 3000 --engine memory --engine fts5:memory
+# [thai-fts-server] Listening on http://0.0.0.0:3000
+# [thai-fts-server] Engines: fts5:memory, memory
+# [thai-fts-server] Default engine: memory
+```
+
+ตั้งผ่าน `THAI_FTS_ENGINES=memory,fts5:file` ก็ได้ เอนจิน sync ตัวแรก (หรือ `--default <ชื่อ>`) จะกลายเป็นเอนจินเริ่มต้น
+
+| Method | Path | คำอธิบาย |
+| --- | --- | --- |
+| `GET` | `/health` | `{ ok, engines, default, version }` |
+| `POST` | `/add` | เพิ่มหรือ upsert เอกสารหนึ่งรายการ |
+| `POST` | `/addMany` | เพิ่มหรือ upsert เอกสารเป็นอาร์เรย์ |
+| `PUT` | `/update` | แทนที่เอกสารหนึ่งรายการ |
+| `DELETE` | `/remove/:id` | ลบเอกสารตาม id |
+| `GET` | `/search?q=...` | ค้นหาด้วยออปชันใน query string |
+| `POST` | `/search` | ค้นหาด้วยออปชันใน JSON body |
+| `POST` | `/searchWithMeta` | ค้นหาพร้อมแฟล็ก `truncated` |
+| `POST` | `/close` | ปิดเอนจิน (เรียกซ้ำได้) |
+
+ทุก path มีรูปแบบเต็มใต้ `/engines/:engine/...` ด้วย การเลือกเอนจินเรียงตามลำดับ: path parameter → header `X-Thai-Fts-Engine` → query parameter `engine` → เอนจินเริ่มต้น
+
+```sh
+curl -X POST localhost:3000/engines/memory/add \
+  -H 'content-type: application/json' \
+  -d '{"id":"g1","title":"คู่มือติดตั้ง","body":"ขั้นตอนการติดตั้งโปรแกรม"}'
+# {"ok":true,"id":"g1"}
+
+curl 'localhost:3000/search?q=%E0%B8%95%E0%B8%B4%E0%B8%94%E0%B8%95%E0%B8%B1%E0%B9%89%E0%B8%87'
+# {"ok":true,"hits":[{"id":"g1","rank":1,"snippet":"...","meta":{"method":"memory","channel":"strict"}}]}
+```
+
+ใช้งานแบบโปรแกรม:
+
+```ts
+import { createServer } from "thai-fts/server";
+
+const server = await createServer({
+  port: 3000,
+  host: "127.0.0.1",
+  engines: [
+    { name: "memory", factory: "createMemoryEngine" },
+    { name: "fts5:memory", factory: "createFts5Engine", options: { memory: true } },
+  ],
+  defaultEngine: "memory",
+});
+
+console.log(server.address());
+await server.close(); // คืนทรัพยากรทุกเอนจิน
+```
+
+body ต้องเป็น JSON (ไม่ใช่ → `400`) และจำกัดที่ 1 MiB (`413`) ทุก response มี `Access-Control-Allow-Origin: *`, `OPTIONS` คืน `204` สำหรับ preflight และ method ผิดบน path ที่มีอยู่คืน `405` พร้อม header `Allow` สัญญาณ `SIGINT`/`SIGTERM` จะปิด HTTP server และเอนจินทั้งหมดก่อนออก
+
 ## สรุป API
 
 | Subpath | เนื้อหา |
@@ -113,6 +171,7 @@ thai-fts --json search "ติดตั้ง" --db db.sqlite          # { ok: t
 | `thai-fts/core` | core ภาษาไทยล้วน (ไม่ต้องใช้ DB) |
 | `thai-fts/engine` | อินเทอร์เฟซเอนจินค้นหา + ทะเบียน + อะแดปเตอร์ in-memory และ HTTP แบบ reference |
 | `thai-fts/fts5` | store / search / schema FTS5 บน `node:sqlite` |
+| `thai-fts/server` | REST API server ที่ไม่ต้องใช้ dependency ภายนอก (`createServer`) |
 
 ### Core — `thai-fts/core`
 
