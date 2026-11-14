@@ -132,6 +132,19 @@ thai-fts serve --port 3000 --engine memory --engine fts5:memory
 
 ทุก path มีรูปแบบเต็มใต้ `/engines/:engine/...` ด้วย การเลือกเอนจินเรียงตามลำดับ: path parameter → header `X-Thai-Fts-Engine` → query parameter `engine` → เอนจินเริ่มต้น
 
+### อะแดปเตอร์ client ฝั่ง HTTP
+
+โปรเซสอื่นคุยกับเซิร์ฟเวอร์นี้ได้ผ่านเอนจิน `thaifts-server` — client แบบ thin ใช้ `fetch` ล้วน ตามคอนแทร็กต์ `ThaiAsyncEngine` (รายละเอียดใน [docs/http-client.md](docs/http-client.md)):
+
+```js
+import { createThaiFtsServerEngine } from "thai-fts";
+
+const engine = createThaiFtsServerEngine({ endpoint: "http://localhost:3000" });
+await engine.add({ id: 1, title: "คู่มือ", body: "ติดตั้งโปรแกรม" });
+const hits = await engine.search("ติดตั้ง"); // async
+engine.close();
+```
+
 ```sh
 curl -X POST localhost:3000/engines/memory/add \
   -H 'content-type: application/json' \
@@ -167,9 +180,9 @@ body ต้องเป็น JSON (ไม่ใช่ → `400`) และจ�
 
 | Subpath | เนื้อหา |
 | --- | --- |
-| `thai-fts` (root) | ทุกอย่างด้านล่าง บวก `createFts5Engine`, `createMemoryEngine`, `createMeilisearchEngine`, `createElasticsearchEngine` |
+| `thai-fts` (root) | ทุกอย่างด้านล่าง บวก `createFts5Engine`, `createMemoryEngine`, `createMeilisearchEngine`, `createElasticsearchEngine`, `createThaiFtsServerEngine` |
 | `thai-fts/core` | core ภาษาไทยล้วน (ไม่ต้องใช้ DB) |
-| `thai-fts/engine` | อินเทอร์เฟซเอนจินค้นหา + ทะเบียน + อะแดปเตอร์ in-memory และ HTTP แบบ reference |
+| `thai-fts/engine` | อินเทอร์เฟซเอนจินค้นหา + ทะเบียน + อะแดปเตอร์ in-memory, HTTP แบบ reference และ client `thaifts-server` |
 | `thai-fts/fts5` | store / search / schema FTS5 บน `node:sqlite` |
 | `thai-fts/server` | REST API server ที่ไม่ต้องใช้ dependency ภายนอก (`createServer`) |
 

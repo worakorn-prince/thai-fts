@@ -1,6 +1,6 @@
 {
   "name": "thai-fts",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "tone-aware Thai full-text search with zero runtime dependencies",
   "author": "worakorn-prince",
   "license": "MIT",

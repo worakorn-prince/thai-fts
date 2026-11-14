@@ -148,6 +148,21 @@ Every path also exists under `/engines/:engine/...`. The engine is resolved in
 this order: path parameter → `X-Thai-Fts-Engine` header → `engine` query
 parameter → default engine.
 
+### HTTP client adapter
+
+Any process can talk to that server through the `thaifts-server` engine — a
+thin fetch-based `ThaiAsyncEngine` client (see
+[docs/http-client.md](docs/http-client.md)):
+
+```js
+import { createThaiFtsServerEngine } from "thai-fts";
+
+const engine = createThaiFtsServerEngine({ endpoint: "http://localhost:3000" });
+await engine.add({ id: 1, title: "คู่มือ", body: "ติดตั้งโปรแกรม" });
+const hits = await engine.search("ติดตั้ง"); // async
+engine.close();
+```
+
 ```sh
 curl -X POST localhost:3000/engines/memory/add \
   -H 'content-type: application/json' \
@@ -186,9 +201,9 @@ preflight and a wrong method on a known path returns `405` with `Allow`.
 
 | Subpath | Surface |
 | --- | --- |
-| `thai-fts` (root) | everything below, plus `createFts5Engine`, `createMemoryEngine`, `createMeilisearchEngine`, `createElasticsearchEngine` |
+| `thai-fts` (root) | everything below, plus `createFts5Engine`, `createMemoryEngine`, `createMeilisearchEngine`, `createElasticsearchEngine`, `createThaiFtsServerEngine` |
 | `thai-fts/core` | pure lexical core (no DB) |
-| `thai-fts/engine` | search-engine interface + registry + in-memory & reference HTTP adapters |
+| `thai-fts/engine` | search-engine interface + registry + in-memory & reference HTTP adapters + the `thaifts-server` client |
 | `thai-fts/fts5` | `node:sqlite` FTS5 store / search / schemas |
 | `thai-fts/server` | zero-dependency REST API server (`createServer`) |
 
@@ -582,8 +597,17 @@ for backends. Shipped today:
   verified `quote`/`start`/`end`) and hits carry no snippet. Treat them as
   "works with a live server" starting points, not tuned integrations.
 
+- **`thaifts-server`** — the thin REST client for this package's own HTTP
+  server (`thai-fts serve` / `createServer`): the same async surface
+  (`add`/`addMany`/`update`/`remove`/`search`/`searchWithMeta`, sync
+  `close()`), targeting `/engines/<engine>/...` when the `engine` option is
+  set or the server default otherwise, with an optional `Authorization:
+  Bearer <apiKey>` header. **Offsets are NOT supported over HTTP** (the
+  server strips `quote`/`start`/`end`) — see
+  [docs/http-client.md](docs/http-client.md).
+
 ```js
-import { createMeilisearchEngine, createElasticsearchEngine } from "thai-fts";
+import { createMeilisearchEngine, createElasticsearchEngine, createThaiFtsServerEngine } from "thai-fts";
 
 const meili = createMeilisearchEngine({ endpoint: "http://localhost:7700", index: "docs", apiKey: "key" });
 await meili.add({ id: 1, title: "คู่มือ", body: "ติดตั้งโปรแกรม" });
